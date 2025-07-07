@@ -1,0 +1,9 @@
+[submodule "Donut"]
+	path = Donut
+	url = https://github.com/NVIDIA-RTX/Donut
+[submodule "libcbt"]
+	path = libcbt
+	url = https://github.com/jdupuy/libcbt
+[submodule "liblieb"]
+	path = libleb
+	url = https://github.com/jdupuy/libleb
