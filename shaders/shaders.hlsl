@@ -1,8 +1,17 @@
 
+
+#include <donut/shaders/binding_helpers.hlsli>
+
+struct PushConstants
+{
+	uint Wireframe;
+};
+DECLARE_PUSH_CONSTANTS(PushConstants, g_Push, 0, 0);
+
 static const float2 g_positions[] = {
-	float2(-0.5, -0.5),
-	float2(0, 0.5),
-	float2(0.5, -0.5)
+	float2(-1, -1),
+	float2(-1, 1),
+	float2(1, -1)
 };
 
 static const float3 g_colors[] = {
@@ -18,7 +27,7 @@ void main_vs(
 )
 {
 	o_pos = float4(g_positions[i_vertexId], 0, 1);
-	o_color = g_colors[i_vertexId];
+	o_color = g_Push.Wireframe ? 0.0f : g_colors[i_vertexId];
 }
 
 void main_ps(
