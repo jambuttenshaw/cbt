@@ -43,6 +43,9 @@ GroupSources("shaders")
 file(GLOB_RECURSE sources "source/*.cpp" "source/*.h")
 GroupSources("source")
 
+set(libcbt_shaders "${CMAKE_CURRENT_SOURCE_DIR}/libcbt/hlsl")
+set(libleb_shaders "${CMAKE_CURRENT_SOURCE_DIR}/libleb/hlsl")
+
 set(project cbt)
 set(folder "cbt")
 
@@ -50,7 +53,7 @@ donut_compile_shaders_all_platforms(
     TARGET ${project}_shaders
     PROJECT_NAME "cbt"
     CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/shaders/shaders.cfg
-    SHADERMAKE_OPTIONS "-I ${CMAKE_CURRENT_SOURCE_DIR}/libcbt/hlsl -I ${CMAKE_CURRENT_SOURCE_DIR}/libleb/hlsl"
+    SHADERMAKE_OPTIONS "-I ${libcbt_shaders} -I ${libleb_shaders}"
     SOURCES ${shaders}
     FOLDER ${folder}
     OUTPUT_BASE ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders/${project}
