@@ -13,14 +13,15 @@ void main_vs(
 )
 {
     cbt_Node node = cbt_DecodeNode(i_instanceId);
-    float3 xPos = float3(0, 0, 1);
-    float3 yPos = float3(1, 0, 0);
 
-    float3x2 posMatrix = leb_DecodeAttributeArray(node, float3x2(xPos, yPos));
+	float3x2 posMatrix = float3x2(float2(0, 0), 
+								  float2(0, 1),
+								  float2(1, 0));
+    posMatrix = leb_DecodeAttributeArray(node, posMatrix);
 
-    float2 pos = float2(posMatrix[0][i_vertexId], posMatrix[1][i_vertexId]);
+    float2 pos = float2(posMatrix[i_vertexId][0], posMatrix[i_vertexId][1]);
 
-    o_pos = float4((2.0f * pos - 1.0f), 0.0f, 1.0f);
+	o_pos = float4((2.0f * pos - 1.0f), 0, 1);
 }
 
 void main_ps(
