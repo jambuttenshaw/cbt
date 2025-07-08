@@ -7,7 +7,10 @@
 #include <donut/core/vfs/VFS.h>
 #include <nvrhi/utils.h>
 
+#define CBT_IMPLEMENTATION
 #include "cbt.h"
+
+#define LEB_IMPLEMENTATION
 #include "leb.h"
 
 using namespace donut;
@@ -20,7 +23,7 @@ struct UIData
 	int Backend = 0;
 
 	float2 Target{ 0.25f, 0.75f };
-    int MaxDepth = 20;
+    int MaxDepth = 10;
 };
 
 class CBTSubdivision : public app::IRenderPass
@@ -35,8 +38,20 @@ private:
     nvrhi::ShaderHandle m_TargetVertexShader;
     nvrhi::ShaderHandle m_TargetPixelShader;
 
-    nvrhi::BindingLayoutHandle m_BindingLayout;
-    nvrhi::BindingSetHandle m_BindingSet;
+    nvrhi::BufferHandle m_CBTBuffer;
+
+    enum CBTBindings
+    {
+	    CBTBinding_ReadOnly,
+        CBTBinding_ReadWrite,
+        CBTBinding_COUNT
+    };
+    nvrhi::BindingLayoutHandle m_CBTBindingLayouts[CBTBinding_COUNT];
+    nvrhi::BindingSetHandle m_CBTBindingSets[CBTBinding_COUNT];
+
+    nvrhi::BindingLayoutHandle m_ConstantsBindingLayout;
+    nvrhi::BindingSetHandle m_ConstantsBindingSet;
+
     nvrhi::CommandListHandle m_CommandList;
 
     enum GraphicsPipelines
@@ -48,6 +63,8 @@ private:
     };
     nvrhi::GraphicsPipelineHandle m_Pipelines[Pipeline_COUNT];
 
+    cbt_Tree* m_CBT{};
+
 public:
     using IRenderPass::IRenderPass;
 
@@ -55,6 +72,10 @@ public:
 	    : IRenderPass(deviceManager)
 		, m_UI(ui)
     {
+        if (m_CBT)
+        {
+	        cbt_Release(m_CBT);
+        }
     }
 
     const std::shared_ptr<engine::ShaderFactory>& GetShaderFactory() const { return m_ShaderFactory; }
@@ -82,17 +103,50 @@ public:
             return false;
         }
 
+        m_CBT = cbt_CreateAtDepth(20, m_UI.MaxDepth);
+
+        {
+            uint64_t byteSize = cbt_HeapByteSize(m_CBT);
+
+            nvrhi::BufferDesc bufferDesc;
+            bufferDesc.setByteSize(byteSize)
+				.setCanHaveRawViews(true)
+				.setCanHaveUAVs(true)
+				.setDebugName("CBT");
+	        m_CBTBuffer = GetDevice()->createBuffer(bufferDesc);
+        }
+
+        {
+            nvrhi::BindingLayoutDesc layoutDesc;
+            nvrhi::BindingSetDesc setDesc;
+
+            layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel)
+                .addItem(nvrhi::BindingLayoutItem::RawBuffer_SRV(0));
+            setDesc.addItem(nvrhi::BindingSetItem::RawBuffer_SRV(0, m_CBTBuffer));
+
+            m_CBTBindingLayouts[CBTBinding_ReadOnly] = GetDevice()->createBindingLayout(layoutDesc);
+            m_CBTBindingSets[CBTBinding_ReadOnly] = GetDevice()->createBindingSet(setDesc, m_CBTBindingLayouts[CBTBinding_ReadOnly]);
+
+
+            layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel)
+                .addItem(nvrhi::BindingLayoutItem::RawBuffer_UAV(0));
+            setDesc.addItem(nvrhi::BindingSetItem::RawBuffer_UAV(0, m_CBTBuffer));
+
+            m_CBTBindingLayouts[CBTBinding_ReadWrite] = GetDevice()->createBindingLayout(layoutDesc);
+            m_CBTBindingSets[CBTBinding_ReadWrite] = GetDevice()->createBindingSet(setDesc, m_CBTBindingLayouts[CBTBinding_ReadWrite]);
+        }
+
         {
 	        nvrhi::BindingLayoutDesc layoutDesc;
             layoutDesc.setVisibility(nvrhi::ShaderType::Vertex)
 				.addItem(nvrhi::BindingLayoutItem::PushConstants(0, 2 * sizeof(uint)));
 
-            m_BindingLayout = GetDevice()->createBindingLayout(layoutDesc);
+            m_ConstantsBindingLayout = GetDevice()->createBindingLayout(layoutDesc);
 
             nvrhi::BindingSetDesc setDesc;
             setDesc.addItem(nvrhi::BindingSetItem::PushConstants(0, 2 * sizeof(uint)));
 
-            m_BindingSet = GetDevice()->createBindingSet(setDesc, m_BindingLayout);
+            m_ConstantsBindingSet = GetDevice()->createBindingSet(setDesc, m_ConstantsBindingLayout);
         }
 
         m_CommandList = GetDevice()->createCommandList();
@@ -123,7 +177,7 @@ public:
                 psoDesc.PS = m_TrianglePixelShader;
                 psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
 
-                psoDesc.bindingLayouts = { m_BindingLayout };
+                psoDesc.bindingLayouts = { m_ConstantsBindingLayout };
                 m_Pipelines[Pipeline_Triangles_Solid] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
 
                 psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
@@ -145,7 +199,7 @@ public:
         nvrhi::GraphicsState state;
         state.framebuffer = framebuffer;
         state.viewport.addViewportAndScissorRect(framebuffer->getFramebufferInfo().getViewport());
-        state.bindings = { m_BindingSet };
+        state.bindings = { m_ConstantsBindingSet };
 
         nvrhi::DrawArguments args;
         {
@@ -199,7 +253,7 @@ protected:
         ImGui::Combo("Backend", &m_UI.Backend, &eBackends[0], 2);
         ImGui::SliderFloat("TargetX", &m_UI.Target.x, 0, 1);
         ImGui::SliderFloat("TargetY", &m_UI.Target.y, 0, 1);
-        ImGui::SliderInt("MaxDepth", &m_UI.MaxDepth, 6, 30);
+        ImGui::SliderInt("MaxDepth", &m_UI.MaxDepth, 6, 20);
         ImGui::Button("Reset");
 
         ImGui::End();
