@@ -20,10 +20,15 @@ static const char* g_WindowTitle = "Concurrent Binary Tree";
 
 struct UIData
 {
+    inline static constexpr uint s_CBTInitDepth = 1;
+    inline static constexpr uint s_CBTMaxDepth = 20;
+
 	int Backend = 0;
 
 	float2 Target{ 0.25f, 0.75f };
-    int MaxDepth = 10;
+    int MaxDepth = s_CBTInitDepth;
+
+    cbt_Tree* CBT = nullptr;
 };
 
 class CBTSubdivision : public app::IRenderPass
@@ -33,6 +38,8 @@ private:
 
     std::shared_ptr<engine::ShaderFactory> m_ShaderFactory;
 
+    nvrhi::ShaderHandle m_TestTriangleVertexShader;
+    nvrhi::ShaderHandle m_TestTrianglePixelShader;
     nvrhi::ShaderHandle m_TriangleVertexShader;
     nvrhi::ShaderHandle m_TrianglePixelShader;
     nvrhi::ShaderHandle m_TargetVertexShader;
@@ -56,14 +63,13 @@ private:
 
     enum GraphicsPipelines
     {
-	    Pipeline_Triangles_Solid = 0,
-	    Pipeline_Triangles_Wireframe,
+	    Pipeline_Test_Triangles_Solid = 0,
+	    Pipeline_Test_Triangles_Wireframe,
+        Pipeline_Triangles_Wireframe,
         Pipeline_Target,
         Pipeline_COUNT
     };
     nvrhi::GraphicsPipelineHandle m_Pipelines[Pipeline_COUNT];
-
-    cbt_Tree* m_CBT{};
 
 public:
     using IRenderPass::IRenderPass;
@@ -72,9 +78,13 @@ public:
 	    : IRenderPass(deviceManager)
 		, m_UI(ui)
     {
-        if (m_CBT)
+    }
+
+    ~CBTSubdivision()
+    {
+        if (m_UI.CBT)
         {
-	        cbt_Release(m_CBT);
+            cbt_Release(m_UI.CBT);
         }
     }
 
@@ -93,27 +103,35 @@ public:
 
         m_ShaderFactory = std::make_shared<engine::ShaderFactory>(GetDevice(), rootFS, "/shaders");
 
-        m_TriangleVertexShader = m_ShaderFactory->CreateShader("app/shaders.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
-        m_TrianglePixelShader = m_ShaderFactory->CreateShader("app/shaders.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+        m_TriangleVertexShader = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
+        m_TrianglePixelShader = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+        m_TestTriangleVertexShader = m_ShaderFactory->CreateShader("app/shaders.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
+        m_TestTrianglePixelShader = m_ShaderFactory->CreateShader("app/shaders.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
         m_TargetVertexShader = m_ShaderFactory->CreateShader("app/target.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
         m_TargetPixelShader = m_ShaderFactory->CreateShader("app/target.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
 
-        if (!m_TriangleVertexShader || !m_TrianglePixelShader || !m_TargetVertexShader || !m_TargetPixelShader)
+        if (!m_TriangleVertexShader || !m_TrianglePixelShader
+         || !m_TestTriangleVertexShader || !m_TestTrianglePixelShader
+         || !m_TargetVertexShader || !m_TargetPixelShader)
         {
             return false;
         }
 
-        m_CBT = cbt_CreateAtDepth(20, m_UI.MaxDepth);
+        m_UI.CBT = cbt_CreateAtDepth(m_UI.s_CBTMaxDepth, m_UI.MaxDepth);
 
         {
-            uint64_t byteSize = cbt_HeapByteSize(m_CBT);
+            uint64_t byteSize = cbt_HeapByteSize(m_UI.CBT);
 
             nvrhi::BufferDesc bufferDesc;
             bufferDesc.setByteSize(byteSize)
 				.setCanHaveRawViews(true)
 				.setCanHaveUAVs(true)
+				.setInitialState(nvrhi::ResourceStates::Common)
+				.setKeepInitialState(true)
 				.setDebugName("CBT");
 	        m_CBTBuffer = GetDevice()->createBuffer(bufferDesc);
+
+
         }
 
         {
@@ -150,6 +168,17 @@ public:
         }
 
         m_CommandList = GetDevice()->createCommandList();
+        m_CommandList->open();
+
+        {
+	        // Upload CBT to GPU
+            m_CommandList->beginTrackingBufferState(m_CBTBuffer, nvrhi::ResourceStates::CopyDest);
+            m_CommandList->writeBuffer(m_CBTBuffer, cbt_GetHeap(m_UI.CBT), cbt_HeapByteSize(m_UI.CBT));
+            m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::ShaderResource);
+        }
+
+        m_CommandList->close();
+        GetDevice()->executeCommandList(m_CommandList);
 
         return true;
     }
@@ -173,21 +202,32 @@ public:
             psoDesc.renderState.depthStencilState.depthTestEnable = false;
 
             {
+                psoDesc.VS = m_TestTriangleVertexShader;
+                psoDesc.PS = m_TestTrianglePixelShader;
+                psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
+                psoDesc.bindingLayouts = { m_ConstantsBindingLayout };
+
+                m_Pipelines[Pipeline_Test_Triangles_Solid] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+
+                psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
+                m_Pipelines[Pipeline_Test_Triangles_Wireframe] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+            }
+            {
                 psoDesc.VS = m_TriangleVertexShader;
                 psoDesc.PS = m_TrianglePixelShader;
                 psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
-
-                psoDesc.bindingLayouts = { m_ConstantsBindingLayout };
-                m_Pipelines[Pipeline_Triangles_Solid] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
-
+                psoDesc.bindingLayouts = { m_CBTBindingLayouts[CBTBinding_ReadOnly]};
                 psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
+
                 m_Pipelines[Pipeline_Triangles_Wireframe] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
             }
             {
                 psoDesc.VS = m_TargetVertexShader;
                 psoDesc.PS = m_TargetPixelShader;
                 psoDesc.primType = nvrhi::PrimitiveType::TriangleStrip;
+                psoDesc.bindingLayouts = { m_ConstantsBindingLayout };
                 psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
+
                 m_Pipelines[Pipeline_Target] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
             }
         }
@@ -202,19 +242,32 @@ public:
         state.bindings = { m_ConstantsBindingSet };
 
         nvrhi::DrawArguments args;
+        if (false)
         {
-            state.pipeline = m_Pipelines[Pipeline_Triangles_Wireframe];
+            state.pipeline = m_Pipelines[Pipeline_Test_Triangles_Wireframe];
             m_CommandList->setGraphicsState(state);
 
             uint2 wireframe{ 1, 0 };
             m_CommandList->setPushConstants(&wireframe, sizeof(wireframe));
 
 	        args.vertexCount = 3;
+            args.instanceCount = static_cast<uint32_t>(cbt_NodeCount(m_UI.CBT));
+            m_CommandList->draw(args);
+        }
+
+        {
+            state.pipeline = m_Pipelines[Pipeline_Triangles_Wireframe];
+            state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly] };
+            m_CommandList->setGraphicsState(state);
+
+            args.vertexCount = 3;
+            args.instanceCount = static_cast<uint32_t>(cbt_NodeCount(m_UI.CBT));
             m_CommandList->draw(args);
         }
 
         {
             state.pipeline = m_Pipelines[Pipeline_Target];
+            state.bindings = { m_ConstantsBindingSet };
             m_CommandList->setGraphicsState(state);
 
             float2 target = m_UI.Target * 2.0f - 1.0f;
