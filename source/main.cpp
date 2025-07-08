@@ -37,8 +37,16 @@ private:
 
     nvrhi::BindingLayoutHandle m_BindingLayout;
     nvrhi::BindingSetHandle m_BindingSet;
-    nvrhi::GraphicsPipelineHandle m_Pipelines[3];
     nvrhi::CommandListHandle m_CommandList;
+
+    enum GraphicsPipelines
+    {
+	    Pipeline_Triangles_Solid = 0,
+	    Pipeline_Triangles_Wireframe,
+        Pipeline_Target,
+        Pipeline_COUNT
+    };
+    nvrhi::GraphicsPipelineHandle m_Pipelines[Pipeline_COUNT];
 
 public:
     using IRenderPass::IRenderPass;
@@ -105,28 +113,28 @@ public:
     
     void Render(nvrhi::IFramebuffer* framebuffer) override
     {
-        if (!m_Pipelines[0] || !m_Pipelines[1] || !m_Pipelines[2])
+        if (!m_Pipelines[0])
         {
             nvrhi::GraphicsPipelineDesc psoDesc;
-            psoDesc.VS = m_TriangleVertexShader;
-            psoDesc.PS = m_TrianglePixelShader;
-            psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
             psoDesc.renderState.depthStencilState.depthTestEnable = false;
 
             {
+                psoDesc.VS = m_TriangleVertexShader;
+                psoDesc.PS = m_TrianglePixelShader;
+                psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
+
                 psoDesc.bindingLayouts = { m_BindingLayout };
-                m_Pipelines[0] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
-            }
-            {
+                m_Pipelines[Pipeline_Triangles_Solid] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+
                 psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
-                m_Pipelines[1] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+                m_Pipelines[Pipeline_Triangles_Wireframe] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
             }
             {
                 psoDesc.VS = m_TargetVertexShader;
                 psoDesc.PS = m_TargetPixelShader;
                 psoDesc.primType = nvrhi::PrimitiveType::TriangleStrip;
                 psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
-                m_Pipelines[2] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+                m_Pipelines[Pipeline_Target] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
             }
         }
 
@@ -140,29 +148,19 @@ public:
         state.bindings = { m_BindingSet };
 
         nvrhi::DrawArguments args;
-        args.vertexCount = 3;
         {
-            state.pipeline = m_Pipelines[0];
-            m_CommandList->setGraphicsState(state);
-
-            uint2 wireframe{ 0, 0 };
-            m_CommandList->setPushConstants(&wireframe, sizeof(wireframe));
-
-            m_CommandList->draw(args);
-        }
-
-        {
-            state.pipeline = m_Pipelines[1];
+            state.pipeline = m_Pipelines[Pipeline_Triangles_Wireframe];
             m_CommandList->setGraphicsState(state);
 
             uint2 wireframe{ 1, 0 };
             m_CommandList->setPushConstants(&wireframe, sizeof(wireframe));
 
+	        args.vertexCount = 3;
             m_CommandList->draw(args);
         }
 
         {
-            state.pipeline = m_Pipelines[2];
+            state.pipeline = m_Pipelines[Pipeline_Target];
             m_CommandList->setGraphicsState(state);
 
             float2 target = m_UI.Target * 2.0f - 1.0f;
