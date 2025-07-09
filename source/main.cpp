@@ -18,12 +18,27 @@ using namespace donut::math;
 
 static const char* g_WindowTitle = "Concurrent Binary Tree";
 
+enum Backends : int
+{
+	Backend_CPU = 0,
+    Backend_GPU,
+    Backend_COUNT
+};
+
+enum DisplayModes : int
+{
+    DisplayMode_Wireframe = 0,
+    DisplayMode_Fill,
+    DisplayMode_COUNT
+};
+
 struct UIData
 {
     inline static constexpr uint s_CBTInitDepth = 4;
     inline static constexpr uint s_CBTMaxDepth = 16;
 
-	int Backend = 0;
+    Backends Backend = Backend_CPU;
+    DisplayModes DisplayMode = DisplayMode_Wireframe;
 
 	float2 Target{ 0.25f, 0.75f };
     int MaxDepth = s_CBTInitDepth;
@@ -107,8 +122,6 @@ private:
 
     std::shared_ptr<engine::ShaderFactory> m_ShaderFactory;
 
-    nvrhi::ShaderHandle m_TestTriangleVertexShader;
-    nvrhi::ShaderHandle m_TestTrianglePixelShader;
     nvrhi::ShaderHandle m_TriangleVertexShader;
     nvrhi::ShaderHandle m_TrianglePixelShader;
     nvrhi::ShaderHandle m_TargetVertexShader;
@@ -132,9 +145,8 @@ private:
 
     enum GraphicsPipelines
     {
-	    Pipeline_Test_Triangles_Solid = 0,
-	    Pipeline_Test_Triangles_Wireframe,
         Pipeline_Triangles_Wireframe,
+	    Pipeline_Triangles_Fill,
         Pipeline_Target,
         Pipeline_COUNT
     };
@@ -174,13 +186,10 @@ public:
 
         m_TriangleVertexShader = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
         m_TrianglePixelShader = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
-        m_TestTriangleVertexShader = m_ShaderFactory->CreateShader("app/shaders.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
-        m_TestTrianglePixelShader = m_ShaderFactory->CreateShader("app/shaders.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
         m_TargetVertexShader = m_ShaderFactory->CreateShader("app/target.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
         m_TargetPixelShader = m_ShaderFactory->CreateShader("app/target.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
 
         if (!m_TriangleVertexShader || !m_TrianglePixelShader
-         || !m_TestTriangleVertexShader || !m_TestTrianglePixelShader
          || !m_TargetVertexShader || !m_TargetPixelShader)
         {
             return false;
@@ -208,8 +217,10 @@ public:
             nvrhi::BindingSetDesc setDesc;
 
             layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel)
-                .addItem(nvrhi::BindingLayoutItem::RawBuffer_SRV(0));
-            setDesc.addItem(nvrhi::BindingSetItem::RawBuffer_SRV(0, m_CBTBuffer));
+                .addItem(nvrhi::BindingLayoutItem::RawBuffer_SRV(0))
+        		.addItem(nvrhi::BindingLayoutItem::PushConstants(0, sizeof(uint2)));
+            setDesc.addItem(nvrhi::BindingSetItem::RawBuffer_SRV(0, m_CBTBuffer))
+        		.addItem(nvrhi::BindingSetItem::PushConstants(0, sizeof(uint2)));
 
             m_CBTBindingLayouts[CBTBinding_ReadOnly] = GetDevice()->createBindingLayout(layoutDesc);
             m_CBTBindingSets[CBTBinding_ReadOnly] = GetDevice()->createBindingSet(setDesc, m_CBTBindingLayouts[CBTBinding_ReadOnly]);
@@ -226,6 +237,7 @@ public:
         {
 	        nvrhi::BindingLayoutDesc layoutDesc;
             layoutDesc.setVisibility(nvrhi::ShaderType::Vertex)
+				.setRegisterSpace(0)
 				.addItem(nvrhi::BindingLayoutItem::PushConstants(0, 2 * sizeof(uint)));
 
             m_ConstantsBindingLayout = GetDevice()->createBindingLayout(layoutDesc);
@@ -289,25 +301,17 @@ public:
             psoDesc.renderState.depthStencilState.depthTestEnable = false;
 
             {
-                psoDesc.VS = m_TestTriangleVertexShader;
-                psoDesc.PS = m_TestTrianglePixelShader;
-                psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
-                psoDesc.bindingLayouts = { m_ConstantsBindingLayout };
-
-                m_Pipelines[Pipeline_Test_Triangles_Solid] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
-
-                psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
-                m_Pipelines[Pipeline_Test_Triangles_Wireframe] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
-            }
-            {
                 psoDesc.VS = m_TriangleVertexShader;
                 psoDesc.PS = m_TrianglePixelShader;
                 psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
-                psoDesc.bindingLayouts = { m_CBTBindingLayouts[CBTBinding_ReadOnly]};
-                psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
+                psoDesc.bindingLayouts = { m_CBTBindingLayouts[CBTBinding_ReadOnly] };
                 psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
 
+                psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
                 m_Pipelines[Pipeline_Triangles_Wireframe] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+
+                psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
+                m_Pipelines[Pipeline_Triangles_Fill] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
             }
             {
                 psoDesc.VS = m_TargetVertexShader;
@@ -334,16 +338,18 @@ public:
         nvrhi::GraphicsState state;
         state.framebuffer = framebuffer;
         state.viewport.addViewportAndScissorRect(framebuffer->getFramebufferInfo().getViewport());
-        state.bindings = { m_ConstantsBindingSet };
 
         nvrhi::DrawArguments args;
         {
-            state.pipeline = m_Pipelines[Pipeline_Triangles_Wireframe];
+            state.pipeline = m_Pipelines[m_UI.DisplayMode == DisplayMode_Wireframe ? Pipeline_Triangles_Wireframe : Pipeline_Triangles_Fill];
             state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly] };
             m_CommandList->setGraphicsState(state);
 
+            uint2 constants = { static_cast<uint>(cbt_NodeCount(m_UI.CBT)), static_cast<uint>(m_UI.DisplayMode) };
+            m_CommandList->setPushConstants(&constants, sizeof(constants));
+
             args.vertexCount = 3;
-            args.instanceCount = static_cast<uint32_t>(cbt_NodeCount(m_UI.CBT));
+            args.instanceCount = constants[0];
             m_CommandList->draw(args);
         }
 
@@ -384,8 +390,11 @@ protected:
 	    ImGui::Begin("Options");
 
         const char* eBackends[] = { "CPU", "GPU" };
+        ImGui::Combo("Backend", reinterpret_cast<int*>(&m_UI.Backend), eBackends, 2);
 
-        ImGui::Combo("Backend", &m_UI.Backend, &eBackends[0], 2);
+        const char* eDisplayModes[] = { "Wireframe", "Fill" };
+        ImGui::Combo("Display Mode", reinterpret_cast<int*>(&m_UI.DisplayMode), eDisplayModes, 2);
+
         ImGui::SliderFloat("TargetX", &m_UI.Target.x, 0, 1);
         ImGui::SliderFloat("TargetY", &m_UI.Target.y, 0, 1);
         if (ImGui::SliderInt("MaxDepth", &m_UI.MaxDepth, 0, m_UI.s_CBTMaxDepth))

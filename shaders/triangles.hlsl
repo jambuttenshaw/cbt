@@ -5,6 +5,12 @@
 #include "../libcbt/hlsl/ConcurrentBinaryTree.hlsl"
 #include "../libleb/hlsl/LongestEdgeBisection.hlsl"
 
+struct PushConstants
+{
+	uint NodeCount;
+	uint DisplayMode;
+};
+DECLARE_PUSH_CONSTANTS(PushConstants, g_Push, 0, 0);
 
 void main_vs(
 	uint i_vertexId : SV_VertexID,
@@ -29,13 +35,22 @@ void main_vs(
 
 float rand1(float n) { return frac(sin(n) * 43758.5453123); }
 
+float3 HUEtoRGB(in float H)
+{
+    float R = abs(H * 6 - 3) - 1;
+    float G = 2 - abs(H * 6 - 2);
+    float B = 2 - abs(H * 6 - 4);
+    return saturate(float3(R, G, B));
+}
+
 void main_ps(
 	in float4 i_pos : SV_Position,
 	in uint i_instanceId : InstanceID,
 	out float4 o_color : SV_Target0
 )
 {
-	//float3 col = i_instanceId / 65536.0f;
-	float3 col = 0.0f;
+	float3 col = g_Push.DisplayMode ? 
+		HUEtoRGB(rand1(((float) i_instanceId / (float) g_Push.NodeCount)))
+		: 0.0f;
 	o_color = float4(col, 1);
 }
