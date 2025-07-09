@@ -20,8 +20,8 @@ static const char* g_WindowTitle = "Concurrent Binary Tree";
 
 struct UIData
 {
-    inline static constexpr uint s_CBTInitDepth = 1;
-    inline static constexpr uint s_CBTMaxDepth = 20;
+    inline static constexpr uint s_CBTInitDepth = 4;
+    inline static constexpr uint s_CBTMaxDepth = 16;
 
 	int Backend = 0;
 
@@ -278,7 +278,7 @@ public:
     {
         GetDeviceManager()->SetInformativeWindowTitle(g_WindowTitle);
 
-        UpdateSubdivision();
+        //UpdateSubdivision();
     }
     
     void Render(nvrhi::IFramebuffer* framebuffer) override
@@ -305,6 +305,7 @@ public:
                 psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
                 psoDesc.bindingLayouts = { m_CBTBindingLayouts[CBTBinding_ReadOnly]};
                 psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
+                psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
 
                 m_Pipelines[Pipeline_Triangles_Wireframe] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
             }
@@ -387,8 +388,16 @@ protected:
         ImGui::Combo("Backend", &m_UI.Backend, &eBackends[0], 2);
         ImGui::SliderFloat("TargetX", &m_UI.Target.x, 0, 1);
         ImGui::SliderFloat("TargetY", &m_UI.Target.y, 0, 1);
-        ImGui::SliderInt("MaxDepth", &m_UI.MaxDepth, 6, 20);
+        if (ImGui::SliderInt("MaxDepth", &m_UI.MaxDepth, 0, m_UI.s_CBTMaxDepth))
+        {
+	        cbt_Release(m_UI.CBT);
+            m_UI.CBT = cbt_CreateAtDepth(m_UI.s_CBTMaxDepth, m_UI.MaxDepth);
+        }
         ImGui::Button("Reset");
+
+        ImGui::Separator();
+
+    	ImGui::Text("Node count: %d", static_cast<int>(cbt_NodeCount(m_UI.CBT)));
 
         ImGui::End();
     }
