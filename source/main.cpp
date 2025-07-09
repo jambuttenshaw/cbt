@@ -121,10 +121,15 @@ private:
 
     std::shared_ptr<engine::ShaderFactory> m_ShaderFactory;
 
-    nvrhi::ShaderHandle m_TriangleVertexShader;
-    nvrhi::ShaderHandle m_TrianglePixelShader;
-    nvrhi::ShaderHandle m_TargetVertexShader;
-    nvrhi::ShaderHandle m_TargetPixelShader;
+    enum Shaders
+    {
+        Shader_Triangle_VS = 0,
+        Shader_Triangle_PS,
+        Shader_Target_VS,
+        Shader_Target_PS,
+        Shader_COUNT,
+    };
+    nvrhi::ShaderHandle m_Shaders[Shader_COUNT];
 
     nvrhi::BufferHandle m_CBTBuffer;
 
@@ -172,24 +177,20 @@ public:
 
     bool Init()
     {
-        auto nativeFS = std::make_shared<vfs::NativeFileSystem>();
-
-        std::filesystem::path appShaderPath = app::GetDirectoryWithExecutable() / "shaders/cbt" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI());
-        std::filesystem::path frameworkShaderPath = app::GetDirectoryWithExecutable() / "shaders/framework" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI());
-
         std::shared_ptr<vfs::RootFileSystem> rootFS = std::make_shared<vfs::RootFileSystem>();
-        rootFS->mount("/shaders/donut", frameworkShaderPath);
-        rootFS->mount("/shaders/app", appShaderPath);
+        rootFS->mount("/shaders/donut", 
+            app::GetDirectoryWithExecutable() / "shaders/framework" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI()));
+        rootFS->mount("/shaders/app", 
+            app::GetDirectoryWithExecutable() / "shaders/cbt" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI()));
 
         m_ShaderFactory = std::make_shared<engine::ShaderFactory>(GetDevice(), rootFS, "/shaders");
 
-        m_TriangleVertexShader = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
-        m_TrianglePixelShader = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
-        m_TargetVertexShader = m_ShaderFactory->CreateShader("app/target.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
-        m_TargetPixelShader = m_ShaderFactory->CreateShader("app/target.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+        m_Shaders[Shader_Triangle_VS] = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
+        m_Shaders[Shader_Triangle_PS] = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+        m_Shaders[Shader_Target_VS] = m_ShaderFactory->CreateShader("app/target.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
+        m_Shaders[Shader_Target_PS] = m_ShaderFactory->CreateShader("app/target.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
 
-        if (!m_TriangleVertexShader || !m_TrianglePixelShader
-         || !m_TargetVertexShader || !m_TargetPixelShader)
+        if (std::ranges::any_of(m_Shaders, [](const auto& shader){ return !shader; }))
         {
             return false;
         }
@@ -295,14 +296,14 @@ public:
     
     void Render(nvrhi::IFramebuffer* framebuffer) override
     {
-        if (!m_Pipelines[0])
+        if (std::ranges::any_of(m_Pipelines, [](const auto& pipeline){ return !pipeline; }))
         {
             nvrhi::GraphicsPipelineDesc psoDesc;
             psoDesc.renderState.depthStencilState.depthTestEnable = false;
 
             {
-                psoDesc.VS = m_TriangleVertexShader;
-                psoDesc.PS = m_TrianglePixelShader;
+                psoDesc.VS = m_Shaders[Shader_Triangle_VS];
+                psoDesc.PS = m_Shaders[Shader_Triangle_PS];
                 psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
                 psoDesc.bindingLayouts = { m_CBTBindingLayouts[CBTBinding_ReadOnly] };
                 psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
@@ -314,8 +315,8 @@ public:
                 m_Pipelines[Pipeline_Triangles_Fill] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
             }
             {
-                psoDesc.VS = m_TargetVertexShader;
-                psoDesc.PS = m_TargetPixelShader;
+                psoDesc.VS = m_Shaders[Shader_Target_VS];
+                psoDesc.PS = m_Shaders[Shader_Target_PS];
                 psoDesc.primType = nvrhi::PrimitiveType::TriangleStrip;
                 psoDesc.bindingLayouts = { m_ConstantsBindingLayout };
                 psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
