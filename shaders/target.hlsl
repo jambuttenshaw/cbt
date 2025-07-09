@@ -30,10 +30,9 @@ void main_ps(
 )
 {
 	float r = length(i_uv);
-	if (r > 1.0f)
+	if (r > 1.0f || r < 0.7f)
 	{
 		discard;
 	}
-	float3 col = r > 0.8f ? 0 : float3(1, 1, 0);
-	o_color = float4(col, 1);
+	o_color = float4(1, 0, 0, 1);
 }
