@@ -52,7 +52,7 @@ struct UIData
     std::bitset<CBT_Bit_COUNT> CBTFlags;
 };
 
-// Triangle intersection tests
+// Methods for performing CBT split / merge logic on the CPU
 float Wedge(const float* a, const float* b)
 {
     return a[0] * b[1] - a[1] * b[0];
@@ -200,20 +200,18 @@ public:
         m_Shaders[Shader_Target_PS] = m_ShaderFactory->CreateShader("app/target.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
 
         if (std::ranges::any_of(m_Shaders, [](const auto& shader){ return !shader; }))
-        {
             return false;
-        }
 
         m_CBT = cbt_CreateAtDepth(m_UI.CBTMaxDepth, s_CBTInitDepth);
         CreateCBTBuffer();
 
         {
             nvrhi::BindingLayoutDesc layoutDesc;
+            layoutDesc.setRegisterSpace(0);
 
             layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel);
             layoutDesc.bindings = {
-                nvrhi::BindingLayoutItem::RawBuffer_SRV(0),
-                nvrhi::BindingLayoutItem::PushConstants(0, sizeof(uint2)),
+                nvrhi::BindingLayoutItem::RawBuffer_SRV(0)
             };
             m_CBTBindingLayouts[CBTBinding_ReadOnly] = GetDevice()->createBindingLayout(layoutDesc);
 
@@ -228,15 +226,13 @@ public:
 
         {
 	        nvrhi::BindingLayoutDesc layoutDesc;
-            layoutDesc.setVisibility(nvrhi::ShaderType::Vertex)
+            layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel)
 				.setRegisterSpace(0)
 				.addItem(nvrhi::BindingLayoutItem::PushConstants(0, sizeof(uint2)));
-
             m_ConstantsBindingLayout = GetDevice()->createBindingLayout(layoutDesc);
 
             nvrhi::BindingSetDesc setDesc;
             setDesc.addItem(nvrhi::BindingSetItem::PushConstants(0, sizeof(uint2)));
-            
             m_ConstantsBindingSet = GetDevice()->createBindingSet(setDesc, m_ConstantsBindingLayout);
         }
 
@@ -261,8 +257,7 @@ public:
     {
         nvrhi::BindingSetDesc setDesc;
         setDesc.bindings = {
-            nvrhi::BindingSetItem::RawBuffer_SRV(0, m_CBTBuffer),
-            nvrhi::BindingSetItem::PushConstants(0, sizeof(uint2))
+            nvrhi::BindingSetItem::RawBuffer_SRV(0, m_CBTBuffer)
         };
         m_CBTBindingSets[CBTBinding_ReadOnly] = GetDevice()->createBindingSet(setDesc, m_CBTBindingLayouts[CBTBinding_ReadOnly]);
 
@@ -283,13 +278,9 @@ public:
         static int pingPong = 0;
 
         if (pingPong == 0) 
-        {
             cbt_Update(m_CBT, &UpdateSubdivisionCpuCallback_Split, &m_UI.Target);
-        }
         else
-        {
             cbt_Update(m_CBT, &UpdateSubdivisionCpuCallback_Merge, &m_UI.Target);
-        }
 
         pingPong = 1 - pingPong;
     }
@@ -297,7 +288,6 @@ public:
     void Animate(float fElapsedTimeSeconds) override
     {
         GetDeviceManager()->SetInformativeWindowTitle(g_WindowTitle);
-
         UpdateSubdivision();
     }
     
@@ -325,7 +315,7 @@ public:
                 psoDesc.VS = m_Shaders[Shader_Triangle_VS];
                 psoDesc.PS = m_Shaders[Shader_Triangle_PS];
                 psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
-                psoDesc.bindingLayouts = { m_CBTBindingLayouts[CBTBinding_ReadOnly] };
+                psoDesc.bindingLayouts = { m_CBTBindingLayouts[CBTBinding_ReadOnly], m_ConstantsBindingLayout };
                 psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
 
                 psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
@@ -363,7 +353,7 @@ public:
         nvrhi::DrawArguments args;
         {
             state.pipeline = m_Pipelines[m_UI.DisplayMode == DisplayMode_Wireframe ? Pipeline_Triangles_Wireframe : Pipeline_Triangles_Fill];
-            state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly] };
+            state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly], m_ConstantsBindingSet };
             m_CommandList->setGraphicsState(state);
 
             uint2 constants = { static_cast<uint>(cbt_NodeCount(m_CBT)), static_cast<uint>(m_UI.DisplayMode) };
