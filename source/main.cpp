@@ -135,6 +135,7 @@ private:
         Shader_Triangle_PS,
         Shader_Target_VS,
         Shader_Target_PS,
+        Shader_LEB_Dispatcher_CS,
         Shader_COUNT,
     };
     nvrhi::ShaderHandle m_Shaders[Shader_COUNT];
@@ -148,7 +149,7 @@ private:
 
     enum CBTBindings
     {
-	    CBTBinding_ReadOnly,
+	    CBTBinding_ReadOnly = 0,
         CBTBinding_ReadWrite,
         CBTBinding_COUNT
     };
@@ -158,16 +159,26 @@ private:
     nvrhi::BindingLayoutHandle m_ConstantsBindingLayout;
     nvrhi::BindingSetHandle m_ConstantsBindingSet;
 
+    nvrhi::BindingLayoutHandle m_IndirectArgsBindingLayout;
+	nvrhi::BindingSetHandle m_IndirectArgsBindingSet;
+
     nvrhi::CommandListHandle m_CommandList;
 
     enum GraphicsPipelines
     {
-        Pipeline_Triangles_Wireframe,
+        Pipeline_Triangles_Wireframe = 0,
 	    Pipeline_Triangles_Fill,
         Pipeline_Target,
-        Pipeline_COUNT
+        GraphicsPipeline_COUNT
     };
-    nvrhi::GraphicsPipelineHandle m_Pipelines[Pipeline_COUNT];
+    nvrhi::GraphicsPipelineHandle m_GraphicsPipelines[GraphicsPipeline_COUNT];
+
+    enum ComputePipelines
+    {
+	    Pipeline_LEB_Dispatcher = 0,
+        ComputePipeline_COUNT
+    };
+    nvrhi::ComputePipelineHandle m_ComputePipelines[ComputePipeline_COUNT];
 
     cbt_Tree* m_CBT = nullptr;
     inline static constexpr uint s_CBTInitDepth = 1;
@@ -204,6 +215,7 @@ public:
         m_Shaders[Shader_Triangle_PS] = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
         m_Shaders[Shader_Target_VS] = m_ShaderFactory->CreateShader("app/target.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
         m_Shaders[Shader_Target_PS] = m_ShaderFactory->CreateShader("app/target.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+        m_Shaders[Shader_LEB_Dispatcher_CS] = m_ShaderFactory->CreateShader("app/dispatcher.hlsl", "leb_dispatcher_cs", nullptr, nvrhi::ShaderType::Compute);
 
         if (std::ranges::any_of(m_Shaders, [](const auto& shader){ return !shader; }))
             return false;
@@ -213,6 +225,7 @@ public:
             bufferDesc.setByteSize(sizeof(IndirectArgs))
 				.setCanHaveTypedViews(true)
                 .setCanHaveUAVs(true)
+				.setStructStride(sizeof(IndirectArgs))
 				.setIsDrawIndirectArgs(true)
                 .setInitialState(nvrhi::ResourceStates::Common)
                 .setKeepInitialState(true)
@@ -249,7 +262,40 @@ public:
             m_ConstantsBindingSet = GetDevice()->createBindingSet(setDesc, m_ConstantsBindingLayout);
         }
 
+        {
+            nvrhi::BindingLayoutDesc layoutDesc;
+            layoutDesc.setVisibility(nvrhi::ShaderType::Compute)
+                .setRegisterSpace(0)
+                .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0));
+            m_IndirectArgsBindingLayout = GetDevice()->createBindingLayout(layoutDesc);
+
+            nvrhi::BindingSetDesc setDesc;
+            setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(0, m_IndirectArgsBuffer));
+            m_IndirectArgsBindingSet = GetDevice()->createBindingSet(setDesc, m_IndirectArgsBindingLayout);
+        }
+
+        {
+            nvrhi::ComputePipelineDesc psoDesc;
+            psoDesc.setComputeShader(m_Shaders[Shader_LEB_Dispatcher_CS])
+                .addBindingLayout(m_CBTBindingLayouts[CBTBinding_ReadOnly])
+                .addBindingLayout(m_IndirectArgsBindingLayout);
+            m_ComputePipelines[Pipeline_LEB_Dispatcher] = GetDevice()->createComputePipeline(psoDesc);
+        }
+
         m_CommandList = GetDevice()->createCommandList();
+        m_CommandList->open();
+
+        {
+            IndirectArgs indirectArgs;
+            indirectArgs.DrawArgs.vertexCount = 3;
+
+            m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::CopyDest);
+            m_CommandList->writeBuffer(m_IndirectArgsBuffer, &indirectArgs, sizeof(indirectArgs));
+            m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::UnorderedAccess);
+        }
+
+        m_CommandList->close();
+        GetDevice()->executeCommandList(m_CommandList);
 
         // Will queue the CBT to be created on the first frame
         m_UI.CBTFlags.set(CBT_Bit_Create);
@@ -290,7 +336,7 @@ public:
         m_CBTBindingSets[CBTBinding_ReadWrite] = GetDevice()->createBindingSet(setDesc, m_CBTBindingLayouts[CBTBinding_ReadWrite]);
     }
 
-    void CreatePipelines(nvrhi::IFramebuffer* framebuffer)
+    void CreateGraphicsPipelines(nvrhi::IFramebuffer* framebuffer)
     {
         nvrhi::GraphicsPipelineDesc psoDesc;
         psoDesc.renderState.depthStencilState.depthTestEnable = false;
@@ -303,10 +349,10 @@ public:
             psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
 
             psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
-            m_Pipelines[Pipeline_Triangles_Wireframe] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+            m_GraphicsPipelines[Pipeline_Triangles_Wireframe] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
 
             psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
-            m_Pipelines[Pipeline_Triangles_Fill] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+            m_GraphicsPipelines[Pipeline_Triangles_Fill] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
         }
         {
             psoDesc.VS = m_Shaders[Shader_Target_VS];
@@ -315,13 +361,13 @@ public:
             psoDesc.bindingLayouts = { m_ConstantsBindingLayout };
             psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
 
-            m_Pipelines[Pipeline_Target] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+            m_GraphicsPipelines[Pipeline_Target] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
         }
     }
 
     void BackBufferResizing() override
     {
-        for (auto& pipeline : m_Pipelines)
+        for (auto& pipeline : m_GraphicsPipelines)
 			pipeline = nullptr;
     }
 
@@ -356,7 +402,7 @@ public:
         nvrhi::GraphicsState state;
         state.framebuffer = framebuffer;
         state.viewport.addViewportAndScissorRect(framebuffer->getFramebufferInfo().getViewport());
-        state.pipeline = m_Pipelines[m_UI.DisplayMode == DisplayMode_Wireframe ? Pipeline_Triangles_Wireframe : Pipeline_Triangles_Fill];
+        state.pipeline = m_GraphicsPipelines[m_UI.DisplayMode == DisplayMode_Wireframe ? Pipeline_Triangles_Wireframe : Pipeline_Triangles_Fill];
         state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly], m_ConstantsBindingSet };
         state.indirectParams = m_IndirectArgsBuffer;
         m_CommandList->setGraphicsState(state);
@@ -372,7 +418,7 @@ public:
         nvrhi::GraphicsState state;
         state.framebuffer = framebuffer;
         state.viewport.addViewportAndScissorRect(framebuffer->getFramebufferInfo().getViewport());
-        state.pipeline = m_Pipelines[Pipeline_Target];
+        state.pipeline = m_GraphicsPipelines[Pipeline_Target];
         state.bindings = { m_ConstantsBindingSet };
         m_CommandList->setGraphicsState(state);
 
@@ -386,9 +432,9 @@ public:
 
     void Render(nvrhi::IFramebuffer* framebuffer) override
     {
-        if (std::ranges::any_of(m_Pipelines, [](const auto& pipeline) { return !pipeline; }))
+        if (std::ranges::any_of(m_GraphicsPipelines, [](const auto& pipeline) { return !pipeline; }))
         {
-            CreatePipelines(framebuffer);
+            CreateGraphicsPipelines(framebuffer);
         }
 
         m_CommandList->open();
@@ -410,18 +456,22 @@ public:
 
         UpdateSubdivision();
 
-        {
-            IndirectArgs indirectArgs;
-            indirectArgs.DrawArgs.vertexCount = 3;
-            indirectArgs.DrawArgs.instanceCount = static_cast<uint32_t>(cbt_NodeCount(m_CBT));
-
-            m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::CopyDest);
-            m_CommandList->writeBuffer(m_IndirectArgsBuffer, &indirectArgs, sizeof(indirectArgs));
-            m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::IndirectArgument);
-        }
-
         nvrhi::utils::ClearColorAttachment(m_CommandList, framebuffer, 0, nvrhi::Color(1.f));
 
+        // Dispatch compute shader to write indirect args
+        {
+            m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::UnorderedAccess);
+
+            nvrhi::ComputeState state;
+            state.pipeline = m_ComputePipelines[Pipeline_LEB_Dispatcher];
+            state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly], m_IndirectArgsBindingSet };
+            m_CommandList->setComputeState(state);
+
+            m_CommandList->dispatch(1);
+
+            m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::IndirectArgument);
+        }
+        
         DrawLeb(framebuffer);
         DrawTarget(framebuffer);
 
