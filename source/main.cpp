@@ -37,7 +37,7 @@ enum DisplayModes : int
 enum CBTBitFlags
 {
     CBT_Bit_Reset = 0, // Reset the tree object to its initial depth
-    CBT_Bit_Recreate,  // Recreate a new tree and buffer (with a new max depth)
+    CBT_Bit_Create,  // Recreate a new tree and buffer (with a new max depth)
     CBT_Bit_COUNT,
 };
 
@@ -139,7 +139,12 @@ private:
     };
     nvrhi::ShaderHandle m_Shaders[Shader_COUNT];
 
-    nvrhi::BufferHandle m_CBTBuffer;
+    struct IndirectArgs
+    {
+        nvrhi::DispatchIndirectArguments DispatchArgs;
+        nvrhi::DrawIndirectArguments DrawArgs;
+    };
+    nvrhi::BufferHandle m_IndirectArgsBuffer;
 
     enum CBTBindings
     {
@@ -166,6 +171,7 @@ private:
 
     cbt_Tree* m_CBT = nullptr;
     inline static constexpr uint s_CBTInitDepth = 1;
+    nvrhi::BufferHandle m_CBTBuffer;
 
 public:
     using IRenderPass::IRenderPass;
@@ -202,8 +208,17 @@ public:
         if (std::ranges::any_of(m_Shaders, [](const auto& shader){ return !shader; }))
             return false;
 
-        m_CBT = cbt_CreateAtDepth(m_UI.CBTMaxDepth, s_CBTInitDepth);
-        CreateCBTBuffer();
+        {
+            nvrhi::BufferDesc bufferDesc;
+            bufferDesc.setByteSize(sizeof(IndirectArgs))
+				.setCanHaveTypedViews(true)
+                .setCanHaveUAVs(true)
+				.setIsDrawIndirectArgs(true)
+                .setInitialState(nvrhi::ResourceStates::Common)
+                .setKeepInitialState(true)
+                .setDebugName("IndirectArgs");
+            m_IndirectArgsBuffer = GetDevice()->createBuffer(bufferDesc);
+        }
 
         {
             nvrhi::BindingLayoutDesc layoutDesc;
@@ -222,8 +237,6 @@ public:
             m_CBTBindingLayouts[CBTBinding_ReadWrite] = GetDevice()->createBindingLayout(layoutDesc);
         }
 
-        CreateCBTBindingSets();
-
         {
 	        nvrhi::BindingLayoutDesc layoutDesc;
             layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel)
@@ -237,6 +250,9 @@ public:
         }
 
         m_CommandList = GetDevice()->createCommandList();
+
+        // Will queue the CBT to be created on the first frame
+        m_UI.CBTFlags.set(CBT_Bit_Create);
 
         return true;
     }
@@ -253,6 +269,13 @@ public:
         m_CBTBuffer = GetDevice()->createBuffer(bufferDesc);
     }
 
+    void CopyToCBTBuffer()
+    {
+        m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::CopyDest);
+        m_CommandList->writeBuffer(m_CBTBuffer, cbt_GetHeap(m_CBT), cbt_HeapByteSize(m_CBT));
+        m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::ShaderResource);
+    }
+
     void CreateCBTBindingSets()
     {
         nvrhi::BindingSetDesc setDesc;
@@ -267,6 +290,35 @@ public:
         m_CBTBindingSets[CBTBinding_ReadWrite] = GetDevice()->createBindingSet(setDesc, m_CBTBindingLayouts[CBTBinding_ReadWrite]);
     }
 
+    void CreatePipelines(nvrhi::IFramebuffer* framebuffer)
+    {
+        nvrhi::GraphicsPipelineDesc psoDesc;
+        psoDesc.renderState.depthStencilState.depthTestEnable = false;
+
+        {
+            psoDesc.VS = m_Shaders[Shader_Triangle_VS];
+            psoDesc.PS = m_Shaders[Shader_Triangle_PS];
+            psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
+            psoDesc.bindingLayouts = { m_CBTBindingLayouts[CBTBinding_ReadOnly], m_ConstantsBindingLayout };
+            psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
+
+            psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
+            m_Pipelines[Pipeline_Triangles_Wireframe] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+
+            psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
+            m_Pipelines[Pipeline_Triangles_Fill] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+        }
+        {
+            psoDesc.VS = m_Shaders[Shader_Target_VS];
+            psoDesc.PS = m_Shaders[Shader_Target_PS];
+            psoDesc.primType = nvrhi::PrimitiveType::TriangleStrip;
+            psoDesc.bindingLayouts = { m_ConstantsBindingLayout };
+            psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
+
+            m_Pipelines[Pipeline_Target] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
+        }
+    }
+
     void BackBufferResizing() override
     {
         for (auto& pipeline : m_Pipelines)
@@ -277,10 +329,19 @@ public:
     {
         static int pingPong = 0;
 
-        if (pingPong == 0) 
-            cbt_Update(m_CBT, &UpdateSubdivisionCpuCallback_Split, &m_UI.Target);
+        if (m_UI.Backend == Backend_CPU)
+        {
+            if (pingPong == 0) 
+                cbt_Update(m_CBT, &UpdateSubdivisionCpuCallback_Split, &m_UI.Target);
+            else
+                cbt_Update(m_CBT, &UpdateSubdivisionCpuCallback_Merge, &m_UI.Target);
+
+            CopyToCBTBuffer();
+        }
         else
-            cbt_Update(m_CBT, &UpdateSubdivisionCpuCallback_Merge, &m_UI.Target);
+        {
+	        
+        }
 
         pingPong = 1 - pingPong;
     }
@@ -288,93 +349,81 @@ public:
     void Animate(float fElapsedTimeSeconds) override
     {
         GetDeviceManager()->SetInformativeWindowTitle(g_WindowTitle);
-        UpdateSubdivision();
     }
-    
+
+    void DrawLeb(nvrhi::IFramebuffer* framebuffer)
+    {
+        nvrhi::GraphicsState state;
+        state.framebuffer = framebuffer;
+        state.viewport.addViewportAndScissorRect(framebuffer->getFramebufferInfo().getViewport());
+        state.pipeline = m_Pipelines[m_UI.DisplayMode == DisplayMode_Wireframe ? Pipeline_Triangles_Wireframe : Pipeline_Triangles_Fill];
+        state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly], m_ConstantsBindingSet };
+        state.indirectParams = m_IndirectArgsBuffer;
+        m_CommandList->setGraphicsState(state);
+
+        uint2 constants = { static_cast<uint>(cbt_NodeCount(m_CBT)), static_cast<uint>(m_UI.DisplayMode) };
+        m_CommandList->setPushConstants(&constants, sizeof(constants));
+
+        m_CommandList->drawIndirect(offsetof(IndirectArgs, DrawArgs));
+    }
+
+    void DrawTarget(nvrhi::IFramebuffer* framebuffer)
+    {
+        nvrhi::GraphicsState state;
+        state.framebuffer = framebuffer;
+        state.viewport.addViewportAndScissorRect(framebuffer->getFramebufferInfo().getViewport());
+        state.pipeline = m_Pipelines[Pipeline_Target];
+        state.bindings = { m_ConstantsBindingSet };
+        m_CommandList->setGraphicsState(state);
+
+        float2 target = m_UI.Target * 2.0f - 1.0f;
+        m_CommandList->setPushConstants(&target, sizeof(target));
+
+        nvrhi::DrawArguments args;
+        args.vertexCount = 4;
+        m_CommandList->draw(args);
+    }
+
     void Render(nvrhi::IFramebuffer* framebuffer) override
     {
-        if (m_UI.CBTFlags.test(CBT_Bit_Recreate))
+        if (std::ranges::any_of(m_Pipelines, [](const auto& pipeline) { return !pipeline; }))
         {
-            cbt_Release(m_CBT);
+            CreatePipelines(framebuffer);
+        }
+
+        m_CommandList->open();
+
+        if (m_UI.CBTFlags.test(CBT_Bit_Create))
+        {
+            if (m_CBT) cbt_Release(m_CBT);
             m_CBT = cbt_CreateAtDepth(m_UI.CBTMaxDepth, s_CBTInitDepth);
             CreateCBTBuffer();
+            if (m_UI.Backend != Backend_CPU) CopyToCBTBuffer();
             CreateCBTBindingSets();
         }
         else if (m_UI.CBTFlags.test(CBT_Bit_Reset))
         {
             cbt_ResetToDepth(m_CBT, s_CBTInitDepth);
+            if (m_UI.Backend != Backend_CPU) CopyToCBTBuffer();
         }
         m_UI.CBTFlags.reset();
 
-        if (std::ranges::any_of(m_Pipelines, [](const auto& pipeline){ return !pipeline; }))
+        UpdateSubdivision();
+
         {
-            nvrhi::GraphicsPipelineDesc psoDesc;
-            psoDesc.renderState.depthStencilState.depthTestEnable = false;
+            IndirectArgs indirectArgs;
+            indirectArgs.DrawArgs.vertexCount = 3;
+            indirectArgs.DrawArgs.instanceCount = static_cast<uint32_t>(cbt_NodeCount(m_CBT));
 
-            {
-                psoDesc.VS = m_Shaders[Shader_Triangle_VS];
-                psoDesc.PS = m_Shaders[Shader_Triangle_PS];
-                psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
-                psoDesc.bindingLayouts = { m_CBTBindingLayouts[CBTBinding_ReadOnly], m_ConstantsBindingLayout };
-                psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
-
-                psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
-                m_Pipelines[Pipeline_Triangles_Wireframe] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
-
-                psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
-                m_Pipelines[Pipeline_Triangles_Fill] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
-            }
-            {
-                psoDesc.VS = m_Shaders[Shader_Target_VS];
-                psoDesc.PS = m_Shaders[Shader_Target_PS];
-                psoDesc.primType = nvrhi::PrimitiveType::TriangleStrip;
-                psoDesc.bindingLayouts = { m_ConstantsBindingLayout };
-                psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
-
-                m_Pipelines[Pipeline_Target] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
-            }
-        }
-
-        m_CommandList->open();
-
-        // Copy latest CBT data to buffer
-        {
-            m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::CopyDest);
-            m_CommandList->writeBuffer(m_CBTBuffer, cbt_GetHeap(m_CBT), cbt_HeapByteSize(m_CBT));
-            m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::ShaderResource);
+            m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::CopyDest);
+            m_CommandList->writeBuffer(m_IndirectArgsBuffer, &indirectArgs, sizeof(indirectArgs));
+            m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::IndirectArgument);
         }
 
         nvrhi::utils::ClearColorAttachment(m_CommandList, framebuffer, 0, nvrhi::Color(1.f));
 
-        nvrhi::GraphicsState state;
-        state.framebuffer = framebuffer;
-        state.viewport.addViewportAndScissorRect(framebuffer->getFramebufferInfo().getViewport());
-
-        nvrhi::DrawArguments args;
-        {
-            state.pipeline = m_Pipelines[m_UI.DisplayMode == DisplayMode_Wireframe ? Pipeline_Triangles_Wireframe : Pipeline_Triangles_Fill];
-            state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly], m_ConstantsBindingSet };
-            m_CommandList->setGraphicsState(state);
-
-            uint2 constants = { static_cast<uint>(cbt_NodeCount(m_CBT)), static_cast<uint>(m_UI.DisplayMode) };
-            m_CommandList->setPushConstants(&constants, sizeof(constants));
-
-            args.vertexCount = 3;
-            args.instanceCount = constants[0];
-            m_CommandList->draw(args);
-        }
-
-        {
-            state.pipeline = m_Pipelines[Pipeline_Target];
-            state.bindings = { m_ConstantsBindingSet };
-            m_CommandList->setGraphicsState(state);
-
-            float2 target = m_UI.Target * 2.0f - 1.0f;
-            m_CommandList->setPushConstants(&target, sizeof(target));
-
-            args.vertexCount = 4;
-            m_CommandList->draw(args);
-        }
+        DrawLeb(framebuffer);
+        DrawTarget(framebuffer);
 
         m_CommandList->close();
         GetDevice()->executeCommandList(m_CommandList);
@@ -408,7 +457,7 @@ protected:
 
         ImGui::SliderFloat("TargetX", &m_UI.Target.x, 0, 1);
         ImGui::SliderFloat("TargetY", &m_UI.Target.y, 0, 1);
-        m_UI.CBTFlags[CBT_Bit_Recreate] = ImGui::SliderInt("MaxDepth", &m_UI.CBTMaxDepth, 6, 20);
+        m_UI.CBTFlags[CBT_Bit_Create] = ImGui::SliderInt("MaxDepth", &m_UI.CBTMaxDepth, 6, 20);
         m_UI.CBTFlags[CBT_Bit_Reset] = ImGui::Button("Reset");
 
         ImGui::Separator();
