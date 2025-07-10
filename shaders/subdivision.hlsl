@@ -9,10 +9,6 @@
 #define FLAG_SPLIT (1)
 #endif
 
-#ifndef FLAG_MERGE
-#define FLAG_MERGE (!FLAG_SPLIT)
-#endif
-
 struct PushConstants
 {
     float2 Target;
@@ -63,9 +59,7 @@ void main_cs(uint3 DTid : SV_DispatchThreadID)
         if (IsInside(faceVertices)) {
             leb_SplitNode(node);
         }
-#endif
-
-#if FLAG_MERGE
+#else
         leb_DiamondParent diamondParent = leb_DecodeDiamondParent(node);
 
         float3x2 baseFaceVertices = DecodeFaceVertices(diamondParent.base);

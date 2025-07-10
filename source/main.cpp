@@ -137,6 +137,9 @@ private:
         Shader_Target_PS,
         Shader_LEB_Dispatcher_CS,
         Shader_CBT_Dispatcher_CS,
+        Shader_CBT_Split_CS,
+        Shader_CBT_Merge_CS,
+        Shader_CBT_SumReduction_CS,
         Shader_COUNT,
     };
     nvrhi::ShaderHandle m_Shaders[Shader_COUNT];
@@ -178,6 +181,9 @@ private:
     {
 	    Pipeline_LEB_Dispatcher = 0,
 	    Pipeline_CBT_Dispatcher,
+        Pipeline_CBT_Split,
+        Pipeline_CBT_Merge,
+        Pipeline_CBT_SumReduction,
         ComputePipeline_COUNT
     };
     nvrhi::ComputePipelineHandle m_ComputePipelines[ComputePipeline_COUNT];
@@ -217,8 +223,16 @@ public:
         m_Shaders[Shader_Triangle_PS] = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
         m_Shaders[Shader_Target_VS] = m_ShaderFactory->CreateShader("app/target.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
         m_Shaders[Shader_Target_PS] = m_ShaderFactory->CreateShader("app/target.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+
         m_Shaders[Shader_LEB_Dispatcher_CS] = m_ShaderFactory->CreateShader("app/dispatcher.hlsl", "leb_dispatcher_cs", nullptr, nvrhi::ShaderType::Compute);
         m_Shaders[Shader_CBT_Dispatcher_CS] = m_ShaderFactory->CreateShader("app/dispatcher.hlsl", "cbt_dispatcher_cs", nullptr, nvrhi::ShaderType::Compute);
+
+        std::vector<engine::ShaderMacro> splitMacros{ {"FLAG_SPLIT", "1"} };
+        m_Shaders[Shader_CBT_Split_CS] = m_ShaderFactory->CreateShader("app/subdivision.hlsl", "main_cs", &splitMacros, nvrhi::ShaderType::Compute);
+        std::vector<engine::ShaderMacro> mergeMacros{ {"FLAG_SPLIT", "0"} };
+        m_Shaders[Shader_CBT_Merge_CS] = m_ShaderFactory->CreateShader("app/subdivision.hlsl", "main_cs", &splitMacros, nvrhi::ShaderType::Compute);
+
+        m_Shaders[Shader_CBT_SumReduction_CS] = m_ShaderFactory->CreateShader("app/sum_reduction.hlsl", "main_cs", nullptr, nvrhi::ShaderType::Compute);
 
         if (std::ranges::any_of(m_Shaders, [](const auto& shader){ return !shader; }))
             return false;
@@ -242,13 +256,13 @@ public:
 
             layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel);
             layoutDesc.bindings = {
-                nvrhi::BindingLayoutItem::RawBuffer_SRV(0)
+                nvrhi::BindingLayoutItem::StructuredBuffer_SRV(0)
             };
             m_CBTBindingLayouts[CBTBinding_ReadOnly] = GetDevice()->createBindingLayout(layoutDesc);
 
             layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel);
             layoutDesc.bindings = {
-                nvrhi::BindingLayoutItem::RawBuffer_UAV(0)
+                nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0)
             };
             m_CBTBindingLayouts[CBTBinding_ReadWrite] = GetDevice()->createBindingLayout(layoutDesc);
         }
@@ -287,6 +301,19 @@ public:
             psoDesc.setComputeShader(m_Shaders[Shader_CBT_Dispatcher_CS]);
             m_ComputePipelines[Pipeline_CBT_Dispatcher] = GetDevice()->createComputePipeline(psoDesc);
         }
+        {
+            nvrhi::ComputePipelineDesc psoDesc;
+            psoDesc.setComputeShader(m_Shaders[Shader_CBT_Split_CS])
+                .addBindingLayout(m_CBTBindingLayouts[CBTBinding_ReadWrite])
+                .addBindingLayout(m_ConstantsBindingLayout);
+            m_ComputePipelines[Pipeline_CBT_Split] = GetDevice()->createComputePipeline(psoDesc);
+
+            psoDesc.setComputeShader(m_Shaders[Shader_CBT_Merge_CS]);
+            m_ComputePipelines[Pipeline_CBT_Merge] = GetDevice()->createComputePipeline(psoDesc);
+
+            psoDesc.setComputeShader(m_Shaders[Shader_CBT_SumReduction_CS]);
+            m_ComputePipelines[Pipeline_CBT_SumReduction] = GetDevice()->createComputePipeline(psoDesc);
+        }
 
         m_CommandList = GetDevice()->createCommandList();
         m_CommandList->open();
@@ -312,7 +339,8 @@ public:
     {
         nvrhi::BufferDesc bufferDesc;
         bufferDesc.setByteSize(cbt_HeapByteSize(m_CBT))
-            .setCanHaveRawViews(true)
+            .setCanHaveTypedViews(true)
+			.setStructStride(sizeof(uint))
             .setCanHaveUAVs(true)
             .setInitialState(nvrhi::ResourceStates::Common)
             .setKeepInitialState(true)
@@ -331,12 +359,12 @@ public:
     {
         nvrhi::BindingSetDesc setDesc;
         setDesc.bindings = {
-            nvrhi::BindingSetItem::RawBuffer_SRV(0, m_CBTBuffer)
+            nvrhi::BindingSetItem::StructuredBuffer_SRV(0, m_CBTBuffer)
         };
         m_CBTBindingSets[CBTBinding_ReadOnly] = GetDevice()->createBindingSet(setDesc, m_CBTBindingLayouts[CBTBinding_ReadOnly]);
 
         setDesc.bindings = {
-            nvrhi::BindingSetItem::RawBuffer_UAV(0, m_CBTBuffer)
+            nvrhi::BindingSetItem::StructuredBuffer_UAV(0, m_CBTBuffer)
         };
         m_CBTBindingSets[CBTBinding_ReadWrite] = GetDevice()->createBindingSet(setDesc, m_CBTBindingLayouts[CBTBinding_ReadWrite]);
     }
@@ -401,7 +429,46 @@ public:
 
                 m_CommandList->dispatch(1);
             }
+
             m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::IndirectArgument);
+            m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::UnorderedAccess);
+            m_CommandList->setEnableUavBarriersForBuffer(m_CBTBuffer, true);
+
+            // Dispatch subdivision
+            {
+                nvrhi::ComputeState state;
+                state.pipeline = m_ComputePipelines[pingPong ? Pipeline_CBT_Merge : Pipeline_CBT_Split];
+                state.bindings = { m_CBTBindingSets[CBTBinding_ReadWrite], m_ConstantsBindingSet };
+                state.indirectParams = m_IndirectArgsBuffer;
+                m_CommandList->setComputeState(state);
+
+                float2 constants = m_UI.Target;
+                m_CommandList->setPushConstants(&constants, sizeof(constants));
+
+                m_CommandList->dispatchIndirect(offsetof(IndirectArgs, DispatchArgs));
+            }
+
+            // Perform sum reduction
+            {
+                nvrhi::ComputeState state;
+                state.pipeline = m_ComputePipelines[Pipeline_CBT_SumReduction];
+                state.bindings = { m_CBTBindingSets[CBTBinding_ReadWrite], m_ConstantsBindingSet };
+                m_CommandList->setComputeState(state);
+
+                int it = static_cast<int>(cbt_MaxDepth(m_CBT));
+                while (--it >= 0) {
+                    int cnt = 1 << it;
+                    int numGroup = (cnt >= 256) ? (cnt >> 8) : 1;
+
+                    uint2 constants = { static_cast<uint>(it), 0 };
+                    m_CommandList->setPushConstants(&constants, sizeof(constants));
+
+                    m_CommandList->dispatch(static_cast<uint32_t>(numGroup));
+                }
+            }
+
+            m_CommandList->setEnableUavBarriersForBuffer(m_CBTBuffer, false);
+            m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::ShaderResource);
         }
 
         pingPong = 1 - pingPong;
