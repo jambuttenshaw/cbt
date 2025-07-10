@@ -7,6 +7,8 @@
 #include <donut/core/vfs/VFS.h>
 #include <nvrhi/utils.h>
 
+#include <bitset>
+
 #define CBT_IMPLEMENTATION
 #include "cbt.h"
 
@@ -32,19 +34,25 @@ enum DisplayModes : int
     DisplayMode_COUNT
 };
 
+enum CBTBitFlags
+{
+    CBT_Bit_Reset = 0, // Reset the tree object to its initial depth
+    CBT_Bit_Recreate,  // Recreate a new tree and buffer (with a new max depth)
+    CBT_Bit_COUNT,
+};
+
 struct UIData
 {
-
     Backends Backend = Backend_GPU;
     DisplayModes DisplayMode = DisplayMode_Wireframe;
 
 	float2 Target{ 0.2371f, 0.7104f };
-    int MaxDepth = 16;
+    int CBTMaxDepth = 16;
 
-    cbt_Tree* CBT = nullptr;
-    inline static constexpr uint s_CBTInitDepth = 1;
+    std::bitset<CBT_Bit_COUNT> CBTFlags;
 };
 
+// Triangle intersection tests
 float Wedge(const float* a, const float* b)
 {
     return a[0] * b[1] - a[1] * b[0];
@@ -156,6 +164,9 @@ private:
     };
     nvrhi::GraphicsPipelineHandle m_Pipelines[Pipeline_COUNT];
 
+    cbt_Tree* m_CBT = nullptr;
+    inline static constexpr uint s_CBTInitDepth = 1;
+
 public:
     using IRenderPass::IRenderPass;
 
@@ -167,13 +178,11 @@ public:
 
     ~CBTSubdivision()
     {
-        if (m_UI.CBT)
-        {
-            cbt_Release(m_UI.CBT);
-        }
+        if (m_CBT) cbt_Release(m_CBT);
     }
 
     const std::shared_ptr<engine::ShaderFactory>& GetShaderFactory() const { return m_ShaderFactory; }
+    int64_t GetCBTNodeCount() const { return m_CBT ? cbt_NodeCount(m_CBT) : 0; }
 
     bool Init()
     {
@@ -195,7 +204,7 @@ public:
             return false;
         }
 
-        m_UI.CBT = cbt_CreateAtDepth(m_UI.MaxDepth, UIData::s_CBTInitDepth);
+        m_CBT = cbt_CreateAtDepth(m_UI.CBTMaxDepth, s_CBTInitDepth);
         CreateCBTBuffer();
 
         {
@@ -238,10 +247,8 @@ public:
 
     void CreateCBTBuffer()
     {
-        uint64_t byteSize = cbt_HeapByteSize(m_UI.CBT);
-
         nvrhi::BufferDesc bufferDesc;
-        bufferDesc.setByteSize(byteSize)
+        bufferDesc.setByteSize(cbt_HeapByteSize(m_CBT))
             .setCanHaveRawViews(true)
             .setCanHaveUAVs(true)
             .setInitialState(nvrhi::ResourceStates::Common)
@@ -277,11 +284,11 @@ public:
 
         if (pingPong == 0) 
         {
-            cbt_Update(m_UI.CBT, &UpdateSubdivisionCpuCallback_Split, &m_UI.Target);
+            cbt_Update(m_CBT, &UpdateSubdivisionCpuCallback_Split, &m_UI.Target);
         }
         else
         {
-            cbt_Update(m_UI.CBT, &UpdateSubdivisionCpuCallback_Merge, &m_UI.Target);
+            cbt_Update(m_CBT, &UpdateSubdivisionCpuCallback_Merge, &m_UI.Target);
         }
 
         pingPong = 1 - pingPong;
@@ -296,6 +303,19 @@ public:
     
     void Render(nvrhi::IFramebuffer* framebuffer) override
     {
+        if (m_UI.CBTFlags.test(CBT_Bit_Recreate))
+        {
+            cbt_Release(m_CBT);
+            m_CBT = cbt_CreateAtDepth(m_UI.CBTMaxDepth, s_CBTInitDepth);
+            CreateCBTBuffer();
+            CreateCBTBindingSets();
+        }
+        else if (m_UI.CBTFlags.test(CBT_Bit_Reset))
+        {
+            cbt_ResetToDepth(m_CBT, s_CBTInitDepth);
+        }
+        m_UI.CBTFlags.reset();
+
         if (std::ranges::any_of(m_Pipelines, [](const auto& pipeline){ return !pipeline; }))
         {
             nvrhi::GraphicsPipelineDesc psoDesc;
@@ -330,7 +350,7 @@ public:
         // Copy latest CBT data to buffer
         {
             m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::CopyDest);
-            m_CommandList->writeBuffer(m_CBTBuffer, cbt_GetHeap(m_UI.CBT), cbt_HeapByteSize(m_UI.CBT));
+            m_CommandList->writeBuffer(m_CBTBuffer, cbt_GetHeap(m_CBT), cbt_HeapByteSize(m_CBT));
             m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::ShaderResource);
         }
 
@@ -346,7 +366,7 @@ public:
             state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly] };
             m_CommandList->setGraphicsState(state);
 
-            uint2 constants = { static_cast<uint>(cbt_NodeCount(m_UI.CBT)), static_cast<uint>(m_UI.DisplayMode) };
+            uint2 constants = { static_cast<uint>(cbt_NodeCount(m_CBT)), static_cast<uint>(m_UI.DisplayMode) };
             m_CommandList->setPushConstants(&constants, sizeof(constants));
 
             args.vertexCount = 3;
@@ -383,8 +403,7 @@ public:
 	    : ImGui_Renderer(deviceManager)
 		, m_UI(ui)
 		, m_App(app)
-    {
-    }
+    {}
 
 protected:
     virtual void buildUI() override
@@ -399,26 +418,16 @@ protected:
 
         ImGui::SliderFloat("TargetX", &m_UI.Target.x, 0, 1);
         ImGui::SliderFloat("TargetY", &m_UI.Target.y, 0, 1);
-        if (ImGui::SliderInt("MaxDepth", &m_UI.MaxDepth, 6, 20))
-        {
-	        cbt_Release(m_UI.CBT);
-            m_UI.CBT = cbt_CreateAtDepth(m_UI.MaxDepth, UIData::s_CBTInitDepth);
-            m_App.CreateCBTBuffer();
-            m_App.CreateCBTBindingSets();
-        }
-        if (ImGui::Button("Reset"))
-        {
-            cbt_ResetToDepth(m_UI.CBT, UIData::s_CBTInitDepth);
-        }
+        m_UI.CBTFlags[CBT_Bit_Recreate] = ImGui::SliderInt("MaxDepth", &m_UI.CBTMaxDepth, 6, 20);
+        m_UI.CBTFlags[CBT_Bit_Reset] = ImGui::Button("Reset");
 
         ImGui::Separator();
 
-    	ImGui::Text("Node count: %d", static_cast<int>(cbt_NodeCount(m_UI.CBT)));
+    	ImGui::Text("Node count: %d", static_cast<int>(m_App.GetCBTNodeCount()));
 
         ImGui::End();
     }
 };
-
 
 #ifdef WIN32
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
@@ -459,7 +468,6 @@ int main(int __argc, const char** __argv)
     }
     
     deviceManager->Shutdown();
-
     delete deviceManager;
 
     return 0;
