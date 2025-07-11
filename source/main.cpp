@@ -47,7 +47,7 @@ struct UIData
     DisplayModes DisplayMode = DisplayMode_Wireframe;
 
 	float2 Target{ 0.2371f, 0.7104f };
-    int CBTMaxDepth = 16;
+    int CBTMaxDepth = 12;
 
     std::bitset<CBT_Bit_COUNT> CBTFlags;
 };
@@ -228,12 +228,8 @@ public:
 
         m_Shaders[Shader_LEB_Dispatcher_CS] = m_ShaderFactory->CreateShader("app/dispatcher.hlsl", "leb_dispatcher_cs", nullptr, nvrhi::ShaderType::Compute);
         m_Shaders[Shader_CBT_Dispatcher_CS] = m_ShaderFactory->CreateShader("app/dispatcher.hlsl", "cbt_dispatcher_cs", nullptr, nvrhi::ShaderType::Compute);
-
-        std::vector<engine::ShaderMacro> splitMacros{ {"FLAG_SPLIT", "1"} };
-        m_Shaders[Shader_CBT_Split_CS] = m_ShaderFactory->CreateShader("app/subdivision.hlsl", "main_cs", &splitMacros, nvrhi::ShaderType::Compute);
-        std::vector<engine::ShaderMacro> mergeMacros{ {"FLAG_SPLIT", "0"} };
-        m_Shaders[Shader_CBT_Merge_CS] = m_ShaderFactory->CreateShader("app/subdivision.hlsl", "main_cs", &splitMacros, nvrhi::ShaderType::Compute);
-
+        m_Shaders[Shader_CBT_Split_CS] = m_ShaderFactory->CreateShader("app/subdivision.hlsl", "split_cs", nullptr, nvrhi::ShaderType::Compute);
+        m_Shaders[Shader_CBT_Merge_CS] = m_ShaderFactory->CreateShader("app/subdivision.hlsl", "merge_cs", nullptr, nvrhi::ShaderType::Compute);
         m_Shaders[Shader_CBT_SumReduction_CS] = m_ShaderFactory->CreateShader("app/sum_reduction.hlsl", "main_cs", nullptr, nvrhi::ShaderType::Compute);
 
         if (std::ranges::any_of(m_Shaders, [](const auto& shader){ return !shader; }))
@@ -609,7 +605,7 @@ protected:
 
         ImGui::SliderFloat("TargetX", &m_UI.Target.x, 0, 1);
         ImGui::SliderFloat("TargetY", &m_UI.Target.y, 0, 1);
-        m_UI.CBTFlags[CBT_Bit_Create] = ImGui::SliderInt("MaxDepth", &m_UI.CBTMaxDepth, 6, 20);
+        m_UI.CBTFlags[CBT_Bit_Create] = ImGui::SliderInt("MaxDepth", &m_UI.CBTMaxDepth, 6, 16);
         m_UI.CBTFlags[CBT_Bit_Reset] = ImGui::Button("Reset");
 
         ImGui::Separator();

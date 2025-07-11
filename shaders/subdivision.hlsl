@@ -5,10 +5,6 @@
 #include "../libcbt/hlsl/ConcurrentBinaryTree.hlsl"
 #include "../libleb/hlsl/LongestEdgeBisection.hlsl"
 
-#ifndef FLAG_SPLIT
-#define FLAG_SPLIT (1)
-#endif
-
 struct PushConstants
 {
     float2 Target;
@@ -45,7 +41,7 @@ float3x2 DecodeFaceVertices(cbt_Node node)
 }
 
 [numthreads(256, 1, 1)]
-void main_cs(uint3 DTid : SV_DispatchThreadID)
+void split_cs(uint3 DTid : SV_DispatchThreadID)
 {
     uint threadID = DTid.x;
 
@@ -53,13 +49,23 @@ void main_cs(uint3 DTid : SV_DispatchThreadID)
     {
         cbt_Node node = cbt_DecodeNode(threadID);
 
-#if FLAG_SPLIT
         float3x2 faceVertices = DecodeFaceVertices(node);
 
         if (IsInside(faceVertices)) {
             leb_SplitNode(node);
         }
-#else
+    }
+}
+
+[numthreads(256, 1, 1)]
+void merge_cs(uint3 DTid : SV_DispatchThreadID)
+{
+    uint threadID = DTid.x;
+
+    if (threadID < cbt_NodeCount())
+    {
+        cbt_Node node = cbt_DecodeNode(threadID);
+
         leb_DiamondParent diamondParent = leb_DecodeDiamondParent(node);
 
         float3x2 baseFaceVertices = DecodeFaceVertices(diamondParent.base);
@@ -68,6 +74,5 @@ void main_cs(uint3 DTid : SV_DispatchThreadID)
         if (!IsInside(baseFaceVertices) && !IsInside(topFaceVertices)) {
             leb_MergeNode(node, diamondParent);
         }
-#endif
     }
 }
