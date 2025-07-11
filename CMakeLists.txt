@@ -53,7 +53,7 @@ donut_compile_shaders_all_platforms(
     TARGET ${project}_shaders
     PROJECT_NAME "cbt"
     CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/shaders/shaders.cfg
-    SHADERMAKE_OPTIONS "-I ${libcbt_shaders} -I ${libleb_shaders}"
+    SHADERMAKE_OPTIONS "-I ${libcbt_shaders} -I ${libleb_shaders} --embedPDB"
     SOURCES ${shaders}
     FOLDER ${folder}
     OUTPUT_BASE ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders/${project}

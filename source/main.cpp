@@ -192,6 +192,8 @@ private:
     inline static constexpr uint s_CBTInitDepth = 1;
     nvrhi::BufferHandle m_CBTBuffer;
 
+    uint64_t FrameCounter = 0;
+
 public:
     using IRenderPass::IRenderPass;
 
@@ -244,8 +246,8 @@ public:
                 .setCanHaveUAVs(true)
 				.setStructStride(sizeof(IndirectArgs))
 				.setIsDrawIndirectArgs(true)
-                .setInitialState(nvrhi::ResourceStates::Common)
-                .setKeepInitialState(true)
+                .setInitialState(nvrhi::ResourceStates::IndirectArgument)
+				.setKeepInitialState(true)
                 .setDebugName("IndirectArgs");
             m_IndirectArgsBuffer = GetDevice()->createBuffer(bufferDesc);
         }
@@ -322,7 +324,7 @@ public:
             IndirectArgs indirectArgs;
             indirectArgs.DrawArgs.vertexCount = 3;
 
-            m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::CopyDest);
+            m_CommandList->beginTrackingBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::CopyDest);
             m_CommandList->writeBuffer(m_IndirectArgsBuffer, &indirectArgs, sizeof(indirectArgs));
         }
 
@@ -350,9 +352,7 @@ public:
 
     void CopyToCBTBuffer()
     {
-        m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::CopyDest);
         m_CommandList->writeBuffer(m_CBTBuffer, cbt_GetHeap(m_CBT), cbt_HeapByteSize(m_CBT));
-        m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::ShaderResource);
     }
 
     void CreateCBTBindingSets()
@@ -419,23 +419,25 @@ public:
         }
         else
         {
+            m_CommandList->beginMarker("Update Subdivision");
+
             // Write indirect args for subdivision kernel
-            m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::UnorderedAccess);
             {
-                nvrhi::ComputeState state;
+				m_CommandList->beginMarker("CBT Dispatch");
+
+            	nvrhi::ComputeState state;
                 state.pipeline = m_ComputePipelines[Pipeline_CBT_Dispatcher];
                 state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly], m_IndirectArgsBindingSet };
                 m_CommandList->setComputeState(state);
 
                 m_CommandList->dispatch(1);
+                m_CommandList->endMarker();
             }
-
-            m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::IndirectArgument);
-            m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::UnorderedAccess);
-            m_CommandList->setEnableUavBarriersForBuffer(m_CBTBuffer, true);
 
             // Dispatch subdivision
             {
+                m_CommandList->beginMarker(pingPong ? "Subdivision: Merge" : "Subdivision: Split");
+
                 nvrhi::ComputeState state;
                 state.pipeline = m_ComputePipelines[pingPong ? Pipeline_CBT_Merge : Pipeline_CBT_Split];
                 state.bindings = { m_CBTBindingSets[CBTBinding_ReadWrite], m_ConstantsBindingSet };
@@ -446,10 +448,13 @@ public:
                 m_CommandList->setPushConstants(&constants, sizeof(constants));
 
                 m_CommandList->dispatchIndirect(offsetof(IndirectArgs, DispatchArgs));
+                m_CommandList->endMarker();
             }
 
             // Perform sum reduction
             {
+                m_CommandList->beginMarker("Sum Reduction");
+
                 nvrhi::ComputeState state;
                 state.pipeline = m_ComputePipelines[Pipeline_CBT_SumReduction];
                 state.bindings = { m_CBTBindingSets[CBTBinding_ReadWrite], m_ConstantsBindingSet };
@@ -464,11 +469,14 @@ public:
                     m_CommandList->setPushConstants(&constants, sizeof(constants));
 
                     m_CommandList->dispatch(static_cast<uint32_t>(numGroup));
+
+                    nvrhi::utils::BufferUavBarrier(m_CommandList, m_CBTBuffer);
+                    m_CommandList->commitBarriers();
                 }
+                m_CommandList->endMarker();
             }
 
-            m_CommandList->setEnableUavBarriersForBuffer(m_CBTBuffer, false);
-            m_CommandList->setBufferState(m_CBTBuffer, nvrhi::ResourceStates::ShaderResource);
+            m_CommandList->endMarker();
         }
 
         pingPong = 1 - pingPong;
@@ -481,7 +489,7 @@ public:
 
     void DrawLeb(nvrhi::IFramebuffer* framebuffer)
     {
-        m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::UnorderedAccess);
+        m_CommandList->beginMarker("Draw LEB");
 
         {
             nvrhi::ComputeState state;
@@ -491,8 +499,6 @@ public:
 
             m_CommandList->dispatch(1);
         }
-
-        m_CommandList->setBufferState(m_IndirectArgsBuffer, nvrhi::ResourceStates::IndirectArgument);
 
         {
             nvrhi::GraphicsState state;
@@ -508,10 +514,14 @@ public:
 
             m_CommandList->drawIndirect(offsetof(IndirectArgs, DrawArgs));
         }
+
+    	m_CommandList->endMarker();
     }
 
     void DrawTarget(nvrhi::IFramebuffer* framebuffer)
     {
+        m_CommandList->beginMarker("Draw Target");
+
         nvrhi::GraphicsState state;
         state.framebuffer = framebuffer;
         state.viewport.addViewportAndScissorRect(framebuffer->getFramebufferInfo().getViewport());
@@ -525,6 +535,8 @@ public:
         nvrhi::DrawArguments args;
         args.vertexCount = 4;
         m_CommandList->draw(args);
+
+        m_CommandList->endMarker();
     }
 
     void Render(nvrhi::IFramebuffer* framebuffer) override
@@ -535,6 +547,11 @@ public:
         }
 
         m_CommandList->open();
+
+        {
+            std::string frameMarker = "Frame " + std::to_string(FrameCounter++);
+            m_CommandList->beginMarker(frameMarker.c_str());
+        }
 
         if (m_UI.CBTFlags.test(CBT_Bit_Create))
         {
@@ -557,6 +574,8 @@ public:
 
         DrawLeb(framebuffer);
         DrawTarget(framebuffer);
+
+        m_CommandList->endMarker();
 
         m_CommandList->close();
         GetDevice()->executeCommandList(m_CommandList);
