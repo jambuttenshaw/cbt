@@ -50,6 +50,8 @@ struct UIData
     int CBTMaxDepth = 12;
 
     std::bitset<CBT_Bit_COUNT> CBTFlags;
+
+    bool UseSumReductionPrePass = true;
 };
 
 // Methods for performing CBT split / merge logic on the CPU
@@ -140,6 +142,7 @@ private:
         Shader_CBT_Dispatcher_CS,
         Shader_CBT_Split_CS,
         Shader_CBT_Merge_CS,
+        Shader_CBT_SumReduction_PrePass_CS,
         Shader_CBT_SumReduction_CS,
         Shader_COUNT,
     };
@@ -180,6 +183,7 @@ private:
 	    Pipeline_CBT_Dispatcher,
         Pipeline_CBT_Split,
         Pipeline_CBT_Merge,
+        Pipeline_CBT_SumReductionPrePass,
         Pipeline_CBT_SumReduction,
         ComputePipeline_COUNT
     };
@@ -228,7 +232,8 @@ public:
         m_Shaders[Shader_CBT_Dispatcher_CS] = m_ShaderFactory->CreateShader("app/dispatcher.hlsl", "cbt_dispatcher_cs", nullptr, nvrhi::ShaderType::Compute);
         m_Shaders[Shader_CBT_Split_CS] = m_ShaderFactory->CreateShader("app/subdivision.hlsl", "split_cs", nullptr, nvrhi::ShaderType::Compute);
         m_Shaders[Shader_CBT_Merge_CS] = m_ShaderFactory->CreateShader("app/subdivision.hlsl", "merge_cs", nullptr, nvrhi::ShaderType::Compute);
-        m_Shaders[Shader_CBT_SumReduction_CS] = m_ShaderFactory->CreateShader("app/sum_reduction.hlsl", "main_cs", nullptr, nvrhi::ShaderType::Compute);
+        m_Shaders[Shader_CBT_SumReduction_PrePass_CS] = m_ShaderFactory->CreateShader("app/sum_reduction.hlsl", "sum_reduction_prepass_cs", nullptr, nvrhi::ShaderType::Compute);
+        m_Shaders[Shader_CBT_SumReduction_CS] = m_ShaderFactory->CreateShader("app/sum_reduction.hlsl", "sum_reduction_cs", nullptr, nvrhi::ShaderType::Compute);
 
         if (std::ranges::any_of(m_Shaders, [](const auto& shader){ return !shader; }))
             return false;
@@ -307,6 +312,9 @@ public:
 
             psoDesc.setComputeShader(m_Shaders[Shader_CBT_Merge_CS]);
             m_ComputePipelines[Pipeline_CBT_Merge] = GetDevice()->createComputePipeline(psoDesc);
+
+            psoDesc.setComputeShader(m_Shaders[Shader_CBT_SumReduction_PrePass_CS]);
+            m_ComputePipelines[Pipeline_CBT_SumReductionPrePass] = GetDevice()->createComputePipeline(psoDesc);
 
             psoDesc.setComputeShader(m_Shaders[Shader_CBT_SumReduction_CS]);
             m_ComputePipelines[Pipeline_CBT_SumReduction] = GetDevice()->createComputePipeline(psoDesc);
@@ -450,13 +458,31 @@ public:
             // Perform sum reduction
             {
                 m_CommandList->beginMarker("Sum Reduction");
+                int it = static_cast<int>(cbt_MaxDepth(m_CBT));
 
                 nvrhi::ComputeState state;
+
+                if (m_UI.UseSumReductionPrePass)
+                {
+                    state.pipeline = m_ComputePipelines[Pipeline_CBT_SumReductionPrePass];
+                    state.bindings = { m_BindingSets[Bindings_CBTReadWrite], m_BindingSets[Bindings_Constants] };
+                    m_CommandList->setComputeState(state);
+
+                    int cnt = ((1 << it) >> 5);
+                    int numGroup = (cnt >= 256) ? (cnt >> 8) : 1;
+
+                    uint2 constants = { static_cast<uint>(it), 0 };
+                    m_CommandList->setPushConstants(&constants, sizeof(constants));
+
+                    m_CommandList->dispatch(static_cast<uint32_t>(numGroup));
+
+                    it -= 5;
+                }
+
                 state.pipeline = m_ComputePipelines[Pipeline_CBT_SumReduction];
                 state.bindings = { m_BindingSets[Bindings_CBTReadWrite], m_BindingSets[Bindings_Constants] };
                 m_CommandList->setComputeState(state);
 
-                int it = static_cast<int>(cbt_MaxDepth(m_CBT));
                 while (--it >= 0) {
                     int cnt = 1 << it;
                     int numGroup = (cnt >= 256) ? (cnt >> 8) : 1;
@@ -599,6 +625,8 @@ protected:
 
         const char* eBackends[] = { "CPU", "GPU" };
         ImGui::Combo("Backend", reinterpret_cast<int*>(&m_UI.Backend), eBackends, 2);
+
+        ImGui::Checkbox("Use Sum Reduction Prepass", &m_UI.UseSumReductionPrePass);
 
         const char* eDisplayModes[] = { "Wireframe", "Fill" };
         ImGui::Combo("Display Mode", reinterpret_cast<int*>(&m_UI.DisplayMode), eDisplayModes, 2);
