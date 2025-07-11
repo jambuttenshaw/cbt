@@ -128,6 +128,7 @@ private:
 	UIData& m_UI;
 
     std::shared_ptr<engine::ShaderFactory> m_ShaderFactory;
+    nvrhi::CommandListHandle m_CommandList;
 
     enum Shaders
     {
@@ -151,22 +152,18 @@ private:
     };
     nvrhi::BufferHandle m_IndirectArgsBuffer;
 
-    enum CBTBindings
+    // Bindings are separated as such to be as modular as possible
+    // All kernels' bindings are a combination of some of these layouts
+    enum Bindings
     {
-	    CBTBinding_ReadOnly = 0,
-        CBTBinding_ReadWrite,
-        CBTBinding_COUNT
+        Bindings_Constants = 0,
+        Bindings_IndirectArgs,
+	    Bindings_CBTReadOnly,
+        Bindings_CBTReadWrite,
+        Bindings_COUNT
     };
-    nvrhi::BindingLayoutHandle m_CBTBindingLayouts[CBTBinding_COUNT];
-    nvrhi::BindingSetHandle m_CBTBindingSets[CBTBinding_COUNT];
-
-    nvrhi::BindingLayoutHandle m_ConstantsBindingLayout;
-    nvrhi::BindingSetHandle m_ConstantsBindingSet;
-
-    nvrhi::BindingLayoutHandle m_IndirectArgsBindingLayout;
-	nvrhi::BindingSetHandle m_IndirectArgsBindingSet;
-
-    nvrhi::CommandListHandle m_CommandList;
+    nvrhi::BindingLayoutHandle m_BindingLayouts[Bindings_COUNT];
+    nvrhi::BindingSetHandle m_BindingSets[Bindings_COUNT];
 
     enum GraphicsPipelines
     {
@@ -219,6 +216,7 @@ public:
         rootFS->mount("/shaders/app", 
             app::GetDirectoryWithExecutable() / "shaders/cbt" / app::GetShaderTypeName(GetDevice()->getGraphicsAPI()));
 
+        // Create shaders
         m_ShaderFactory = std::make_shared<engine::ShaderFactory>(GetDevice(), rootFS, "/shaders");
 
         m_Shaders[Shader_Triangle_VS] = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
@@ -235,6 +233,7 @@ public:
         if (std::ranges::any_of(m_Shaders, [](const auto& shader){ return !shader; }))
             return false;
 
+        // Create indirect args buffer
         {
             nvrhi::BufferDesc bufferDesc;
             bufferDesc.setByteSize(sizeof(IndirectArgs))
@@ -248,6 +247,18 @@ public:
             m_IndirectArgsBuffer = GetDevice()->createBuffer(bufferDesc);
         }
 
+        // Setup bindings
+        {
+            nvrhi::BindingLayoutDesc layoutDesc;
+            layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel)
+                .setRegisterSpace(0)
+                .addItem(nvrhi::BindingLayoutItem::PushConstants(0, sizeof(uint2)));
+            m_BindingLayouts[Bindings_Constants] = GetDevice()->createBindingLayout(layoutDesc);
+
+            nvrhi::BindingSetDesc setDesc;
+            setDesc.addItem(nvrhi::BindingSetItem::PushConstants(0, sizeof(uint2)));
+            m_BindingSets[Bindings_Constants] = GetDevice()->createBindingSet(setDesc, m_BindingLayouts[Bindings_Constants]);
+        }
         {
             nvrhi::BindingLayoutDesc layoutDesc;
             layoutDesc.setRegisterSpace(0);
@@ -256,44 +267,32 @@ public:
             layoutDesc.bindings = {
                 nvrhi::BindingLayoutItem::StructuredBuffer_SRV(0)
             };
-            m_CBTBindingLayouts[CBTBinding_ReadOnly] = GetDevice()->createBindingLayout(layoutDesc);
+            m_BindingLayouts[Bindings_CBTReadOnly] = GetDevice()->createBindingLayout(layoutDesc);
 
             layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel);
             layoutDesc.bindings = {
                 nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0)
             };
-            m_CBTBindingLayouts[CBTBinding_ReadWrite] = GetDevice()->createBindingLayout(layoutDesc);
+            m_BindingLayouts[Bindings_CBTReadWrite] = GetDevice()->createBindingLayout(layoutDesc);
         }
-
-        {
-	        nvrhi::BindingLayoutDesc layoutDesc;
-            layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel)
-				.setRegisterSpace(0)
-				.addItem(nvrhi::BindingLayoutItem::PushConstants(0, sizeof(uint2)));
-            m_ConstantsBindingLayout = GetDevice()->createBindingLayout(layoutDesc);
-
-            nvrhi::BindingSetDesc setDesc;
-            setDesc.addItem(nvrhi::BindingSetItem::PushConstants(0, sizeof(uint2)));
-            m_ConstantsBindingSet = GetDevice()->createBindingSet(setDesc, m_ConstantsBindingLayout);
-        }
-
         {
             nvrhi::BindingLayoutDesc layoutDesc;
             layoutDesc.setVisibility(nvrhi::ShaderType::Compute)
                 .setRegisterSpace(0)
                 .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0));
-            m_IndirectArgsBindingLayout = GetDevice()->createBindingLayout(layoutDesc);
+            m_BindingLayouts[Bindings_IndirectArgs] = GetDevice()->createBindingLayout(layoutDesc);
 
             nvrhi::BindingSetDesc setDesc;
             setDesc.addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(0, m_IndirectArgsBuffer));
-            m_IndirectArgsBindingSet = GetDevice()->createBindingSet(setDesc, m_IndirectArgsBindingLayout);
+            m_BindingSets[Bindings_IndirectArgs] = GetDevice()->createBindingSet(setDesc, m_BindingLayouts[Bindings_IndirectArgs]);
         }
 
+        // Create compute pipelines (graphics pipelines need to know the framebuffer)
         {
             nvrhi::ComputePipelineDesc psoDesc;
             psoDesc.setComputeShader(m_Shaders[Shader_LEB_Dispatcher_CS])
-                .addBindingLayout(m_CBTBindingLayouts[CBTBinding_ReadOnly])
-                .addBindingLayout(m_IndirectArgsBindingLayout);
+                .addBindingLayout(m_BindingLayouts[Bindings_CBTReadOnly])
+                .addBindingLayout(m_BindingLayouts[Bindings_IndirectArgs]);
             m_ComputePipelines[Pipeline_LEB_Dispatcher] = GetDevice()->createComputePipeline(psoDesc);
 
             psoDesc.setComputeShader(m_Shaders[Shader_CBT_Dispatcher_CS]);
@@ -302,8 +301,8 @@ public:
         {
             nvrhi::ComputePipelineDesc psoDesc;
             psoDesc.setComputeShader(m_Shaders[Shader_CBT_Split_CS])
-                .addBindingLayout(m_CBTBindingLayouts[CBTBinding_ReadWrite])
-                .addBindingLayout(m_ConstantsBindingLayout);
+                .addBindingLayout(m_BindingLayouts[Bindings_CBTReadWrite])
+                .addBindingLayout(m_BindingLayouts[Bindings_Constants]);
             m_ComputePipelines[Pipeline_CBT_Split] = GetDevice()->createComputePipeline(psoDesc);
 
             psoDesc.setComputeShader(m_Shaders[Shader_CBT_Merge_CS]);
@@ -313,6 +312,7 @@ public:
             m_ComputePipelines[Pipeline_CBT_SumReduction] = GetDevice()->createComputePipeline(psoDesc);
         }
 
+        // Upload initial data to indirect args (instance/group count will be modified by dispatcher kernels)
         m_CommandList = GetDevice()->createCommandList();
         m_CommandList->open();
 
@@ -357,12 +357,12 @@ public:
         setDesc.bindings = {
             nvrhi::BindingSetItem::StructuredBuffer_SRV(0, m_CBTBuffer)
         };
-        m_CBTBindingSets[CBTBinding_ReadOnly] = GetDevice()->createBindingSet(setDesc, m_CBTBindingLayouts[CBTBinding_ReadOnly]);
+        m_BindingSets[Bindings_CBTReadOnly] = GetDevice()->createBindingSet(setDesc, m_BindingLayouts[Bindings_CBTReadOnly]);
 
         setDesc.bindings = {
             nvrhi::BindingSetItem::StructuredBuffer_UAV(0, m_CBTBuffer)
         };
-        m_CBTBindingSets[CBTBinding_ReadWrite] = GetDevice()->createBindingSet(setDesc, m_CBTBindingLayouts[CBTBinding_ReadWrite]);
+        m_BindingSets[Bindings_CBTReadWrite] = GetDevice()->createBindingSet(setDesc, m_BindingLayouts[Bindings_CBTReadWrite]);
     }
 
     void CreateGraphicsPipelines(nvrhi::IFramebuffer* framebuffer)
@@ -374,7 +374,7 @@ public:
             psoDesc.VS = m_Shaders[Shader_Triangle_VS];
             psoDesc.PS = m_Shaders[Shader_Triangle_PS];
             psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
-            psoDesc.bindingLayouts = { m_CBTBindingLayouts[CBTBinding_ReadOnly], m_ConstantsBindingLayout };
+            psoDesc.bindingLayouts = { m_BindingLayouts[Bindings_CBTReadOnly], m_BindingLayouts[Bindings_Constants] };
             psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
 
             psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
@@ -387,7 +387,7 @@ public:
             psoDesc.VS = m_Shaders[Shader_Target_VS];
             psoDesc.PS = m_Shaders[Shader_Target_PS];
             psoDesc.primType = nvrhi::PrimitiveType::TriangleStrip;
-            psoDesc.bindingLayouts = { m_ConstantsBindingLayout };
+            psoDesc.bindingLayouts = { m_BindingLayouts[Bindings_Constants] };
             psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
 
             m_GraphicsPipelines[Pipeline_Target] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
@@ -423,7 +423,7 @@ public:
 
             	nvrhi::ComputeState state;
                 state.pipeline = m_ComputePipelines[Pipeline_CBT_Dispatcher];
-                state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly], m_IndirectArgsBindingSet };
+                state.bindings = { m_BindingSets[Bindings_CBTReadOnly], m_BindingSets[Bindings_IndirectArgs] };
                 m_CommandList->setComputeState(state);
 
                 m_CommandList->dispatch(1);
@@ -436,7 +436,7 @@ public:
 
                 nvrhi::ComputeState state;
                 state.pipeline = m_ComputePipelines[pingPong ? Pipeline_CBT_Merge : Pipeline_CBT_Split];
-                state.bindings = { m_CBTBindingSets[CBTBinding_ReadWrite], m_ConstantsBindingSet };
+                state.bindings = { m_BindingSets[Bindings_CBTReadWrite], m_BindingSets[Bindings_Constants] };
                 state.indirectParams = m_IndirectArgsBuffer;
                 m_CommandList->setComputeState(state);
 
@@ -453,7 +453,7 @@ public:
 
                 nvrhi::ComputeState state;
                 state.pipeline = m_ComputePipelines[Pipeline_CBT_SumReduction];
-                state.bindings = { m_CBTBindingSets[CBTBinding_ReadWrite], m_ConstantsBindingSet };
+                state.bindings = { m_BindingSets[Bindings_CBTReadWrite], m_BindingSets[Bindings_Constants] };
                 m_CommandList->setComputeState(state);
 
                 int it = static_cast<int>(cbt_MaxDepth(m_CBT));
@@ -490,7 +490,7 @@ public:
         {
             nvrhi::ComputeState state;
             state.pipeline = m_ComputePipelines[Pipeline_LEB_Dispatcher];
-            state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly], m_IndirectArgsBindingSet };
+            state.bindings = { m_BindingSets[Bindings_CBTReadOnly], m_BindingSets[Bindings_IndirectArgs] };
             m_CommandList->setComputeState(state);
 
             m_CommandList->dispatch(1);
@@ -501,7 +501,7 @@ public:
             state.framebuffer = framebuffer;
             state.viewport.addViewportAndScissorRect(framebuffer->getFramebufferInfo().getViewport());
             state.pipeline = m_GraphicsPipelines[m_UI.DisplayMode == DisplayMode_Wireframe ? Pipeline_Triangles_Wireframe : Pipeline_Triangles_Fill];
-            state.bindings = { m_CBTBindingSets[CBTBinding_ReadOnly], m_ConstantsBindingSet };
+            state.bindings = { m_BindingSets[Bindings_CBTReadOnly], m_BindingSets[Bindings_Constants] };
             state.indirectParams = m_IndirectArgsBuffer;
             m_CommandList->setGraphicsState(state);
 
@@ -522,7 +522,7 @@ public:
         state.framebuffer = framebuffer;
         state.viewport.addViewportAndScissorRect(framebuffer->getFramebufferInfo().getViewport());
         state.pipeline = m_GraphicsPipelines[Pipeline_Target];
-        state.bindings = { m_ConstantsBindingSet };
+        state.bindings = { m_BindingSets[Bindings_Constants] };
         m_CommandList->setGraphicsState(state);
 
         float2 target = m_UI.Target * 2.0f - 1.0f;
