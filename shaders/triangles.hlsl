@@ -59,7 +59,7 @@ void fill_vs(
 float hash(float2 p)
 {
     float3 p3 = frac(float3(p.xyx) * .1031f);
-    p3 += dot(p3, p3.yzx + 17.19f);
+    p3 += dot(p3, p3.yzx + 19.19f);
     return frac((p3.x + p3.y) * p3.z);
 }
 
@@ -77,5 +77,5 @@ void fill_ps(
 	out float4 o_color : SV_Target0
 )
 {
-    o_color = float4(HUEtoRGB(hash(i_centre)), 1);
+    o_color = float4(HUEtoRGB(saturate(hash(i_centre))), 1);
 }

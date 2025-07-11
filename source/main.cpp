@@ -385,7 +385,7 @@ public:
         {
             psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
             psoDesc.bindingLayouts = { m_BindingLayouts[Bindings_CBTReadOnly] };
-            psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
+            psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::Front; // CBT library produces triangles with wrong winding order
 
             psoDesc.VS = m_Shaders[Shader_Triangle_Wireframe_VS];
             psoDesc.PS = m_Shaders[Shader_Triangle_Wireframe_PS];
@@ -402,6 +402,7 @@ public:
             psoDesc.PS = m_Shaders[Shader_Target_PS];
             psoDesc.primType = nvrhi::PrimitiveType::TriangleStrip;
             psoDesc.bindingLayouts = { m_BindingLayouts[Bindings_Constants] };
+            psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::Back;
 
             m_GraphicsPipelines[Pipeline_Target] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
         }
