@@ -134,8 +134,10 @@ private:
 
     enum Shaders
     {
-        Shader_Triangle_VS = 0,
-        Shader_Triangle_PS,
+        Shader_Triangle_Wireframe_VS = 0,
+        Shader_Triangle_Wireframe_PS,
+        Shader_Triangle_Fill_VS,
+        Shader_Triangle_Fill_PS,
         Shader_Target_VS,
         Shader_Target_PS,
         Shader_LEB_Dispatcher_CS,
@@ -223,8 +225,10 @@ public:
         // Create shaders
         m_ShaderFactory = std::make_shared<engine::ShaderFactory>(GetDevice(), rootFS, "/shaders");
 
-        m_Shaders[Shader_Triangle_VS] = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
-        m_Shaders[Shader_Triangle_PS] = m_ShaderFactory->CreateShader("app/triangles.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+        m_Shaders[Shader_Triangle_Wireframe_VS] = m_ShaderFactory->CreateShader("app/triangles.hlsl", "wireframe_vs", nullptr, nvrhi::ShaderType::Vertex);
+        m_Shaders[Shader_Triangle_Wireframe_PS] = m_ShaderFactory->CreateShader("app/triangles.hlsl", "wireframe_ps", nullptr, nvrhi::ShaderType::Pixel);
+        m_Shaders[Shader_Triangle_Fill_VS] = m_ShaderFactory->CreateShader("app/triangles.hlsl", "fill_vs", nullptr, nvrhi::ShaderType::Vertex);
+        m_Shaders[Shader_Triangle_Fill_PS] = m_ShaderFactory->CreateShader("app/triangles.hlsl", "fill_ps", nullptr, nvrhi::ShaderType::Pixel);
         m_Shaders[Shader_Target_VS] = m_ShaderFactory->CreateShader("app/target.hlsl", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
         m_Shaders[Shader_Target_PS] = m_ShaderFactory->CreateShader("app/target.hlsl", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
 
@@ -379,15 +383,17 @@ public:
         psoDesc.renderState.depthStencilState.depthTestEnable = false;
 
         {
-            psoDesc.VS = m_Shaders[Shader_Triangle_VS];
-            psoDesc.PS = m_Shaders[Shader_Triangle_PS];
             psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
-            psoDesc.bindingLayouts = { m_BindingLayouts[Bindings_CBTReadOnly], m_BindingLayouts[Bindings_Constants] };
+            psoDesc.bindingLayouts = { m_BindingLayouts[Bindings_CBTReadOnly] };
             psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
 
+            psoDesc.VS = m_Shaders[Shader_Triangle_Wireframe_VS];
+            psoDesc.PS = m_Shaders[Shader_Triangle_Wireframe_PS];
             psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Wireframe;
             m_GraphicsPipelines[Pipeline_Triangles_Wireframe] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
 
+            psoDesc.VS = m_Shaders[Shader_Triangle_Fill_VS];
+            psoDesc.PS = m_Shaders[Shader_Triangle_Fill_PS];
             psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
             m_GraphicsPipelines[Pipeline_Triangles_Fill] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
         }
@@ -396,7 +402,6 @@ public:
             psoDesc.PS = m_Shaders[Shader_Target_PS];
             psoDesc.primType = nvrhi::PrimitiveType::TriangleStrip;
             psoDesc.bindingLayouts = { m_BindingLayouts[Bindings_Constants] };
-            psoDesc.renderState.rasterState.fillMode = nvrhi::RasterFillMode::Fill;
 
             m_GraphicsPipelines[Pipeline_Target] = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer);
         }
@@ -527,12 +532,9 @@ public:
             state.framebuffer = framebuffer;
             state.viewport.addViewportAndScissorRect(framebuffer->getFramebufferInfo().getViewport());
             state.pipeline = m_GraphicsPipelines[m_UI.DisplayMode == DisplayMode_Wireframe ? Pipeline_Triangles_Wireframe : Pipeline_Triangles_Fill];
-            state.bindings = { m_BindingSets[Bindings_CBTReadOnly], m_BindingSets[Bindings_Constants] };
+            state.bindings = { m_BindingSets[Bindings_CBTReadOnly] };
             state.indirectParams = m_IndirectArgsBuffer;
             m_CommandList->setGraphicsState(state);
-
-            uint2 constants = { static_cast<uint>(cbt_NodeCount(m_CBT)), static_cast<uint>(m_UI.DisplayMode) };
-            m_CommandList->setPushConstants(&constants, sizeof(constants));
 
             m_CommandList->drawIndirect(offsetof(IndirectArgs, DrawArgs));
         }
