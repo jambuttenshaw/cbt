@@ -41,6 +41,14 @@ enum CBTBitFlags
     CBT_Bit_COUNT,
 };
 
+enum GPUTimers
+{
+    Timer_Subdivision = 0,
+    Timer_SumReduction,
+    Timer_DrawLEB,
+    Timer_COUNT
+};
+
 struct UIData
 {
     Backends Backend = Backend_GPU;
@@ -51,7 +59,8 @@ struct UIData
 
     std::bitset<CBT_Bit_COUNT> CBTFlags;
 
-    bool UseSumReductionPrePass = true;
+    // Updated by the application to display in the UI (in milliseconds)
+    std::array<float, Timer_COUNT> TimerData{};
 };
 
 // Methods for performing CBT split / merge logic on the CPU
@@ -195,7 +204,8 @@ private:
     inline static constexpr uint s_CBTInitDepth = 1;
     nvrhi::BufferHandle m_CBTBuffer;
 
-    uint64_t FrameCounter = 0;
+    std::vector<std::array<nvrhi::TimerQueryHandle, Timer_COUNT>> m_Timers; // One set of timers per back buffer to avoid blocking
+    uint m_TimerSetIndex = 0;
 
 public:
     using IRenderPass::IRenderPass;
@@ -212,7 +222,7 @@ public:
     }
 
     const std::shared_ptr<engine::ShaderFactory>& GetShaderFactory() const { return m_ShaderFactory; }
-    int64_t GetCBTNodeCount() const { return m_CBT ? cbt_NodeCount(m_CBT) : 0; }
+    nvrhi::ITimerQuery* GetTimer(GPUTimers timer) const { return m_Timers.at(m_TimerSetIndex).at(timer); }
 
     bool Init()
     {
@@ -322,6 +332,16 @@ public:
 
             psoDesc.setComputeShader(m_Shaders[Shader_CBT_SumReduction_CS]);
             m_ComputePipelines[Pipeline_CBT_SumReduction] = GetDevice()->createComputePipeline(psoDesc);
+        }
+
+        // Create GPU timer queries
+        for (size_t i = 0; i < GetDeviceManager()->GetDeviceParams().swapChainBufferCount; i++)
+        {
+            auto& timers = m_Timers.emplace_back();
+            for (auto& timer : timers)
+            {
+				timer = GetDevice()->createTimerQuery();
+            }
         }
 
         // Upload initial data to indirect args (instance/group count will be modified by dispatcher kernels)
@@ -447,6 +467,7 @@ public:
             // Dispatch subdivision
             {
                 m_CommandList->beginMarker(pingPong ? "Subdivision: Merge" : "Subdivision: Split");
+                m_CommandList->beginTimerQuery(GetTimer(Timer_Subdivision));
 
                 nvrhi::ComputeState state;
                 state.pipeline = m_ComputePipelines[pingPong ? Pipeline_CBT_Merge : Pipeline_CBT_Split];
@@ -458,17 +479,20 @@ public:
                 m_CommandList->setPushConstants(&constants, sizeof(constants));
 
                 m_CommandList->dispatchIndirect(offsetof(IndirectArgs, DispatchArgs));
+
+                m_CommandList->endTimerQuery(GetTimer(Timer_Subdivision));
                 m_CommandList->endMarker();
             }
 
             // Perform sum reduction
             {
                 m_CommandList->beginMarker("Sum Reduction");
+                m_CommandList->beginTimerQuery(GetTimer(Timer_SumReduction));
+
                 int it = static_cast<int>(cbt_MaxDepth(m_CBT));
 
                 nvrhi::ComputeState state;
 
-                if (m_UI.UseSumReductionPrePass)
                 {
                     state.pipeline = m_ComputePipelines[Pipeline_CBT_SumReductionPrePass];
                     state.bindings = { m_BindingSets[Bindings_CBTReadWrite], m_BindingSets[Bindings_Constants] };
@@ -501,6 +525,8 @@ public:
                     nvrhi::utils::BufferUavBarrier(m_CommandList, m_CBTBuffer);
                     m_CommandList->commitBarriers();
                 }
+
+                m_CommandList->endTimerQuery(GetTimer(Timer_SumReduction));
                 m_CommandList->endMarker();
             }
 
@@ -518,6 +544,7 @@ public:
     void DrawLeb(nvrhi::IFramebuffer* framebuffer)
     {
         m_CommandList->beginMarker("Draw LEB");
+        m_CommandList->beginTimerQuery(GetTimer(Timer_DrawLEB));
 
         {
             nvrhi::ComputeState state;
@@ -540,6 +567,7 @@ public:
             m_CommandList->drawIndirect(offsetof(IndirectArgs, DrawArgs));
         }
 
+        m_CommandList->endTimerQuery(GetTimer(Timer_DrawLEB));
     	m_CommandList->endMarker();
     }
 
@@ -566,6 +594,22 @@ public:
 
     void Render(nvrhi::IFramebuffer* framebuffer) override
     {
+        // Check if any timers have data available
+        {
+            const auto& timers = m_Timers.at(m_TimerSetIndex);
+            for (size_t timerIndex = 0; timerIndex < timers.size(); timerIndex++)
+            {
+                const auto& timer = timers[timerIndex];
+	            if (GetDevice()->pollTimerQuery(timer))
+	            {
+                    // Send timer data to UI in milliseconds
+                    m_UI.TimerData[timerIndex] = GetDevice()->getTimerQueryTime(timer) * 1000.0f;
+                    GetDevice()->resetTimerQuery(timer);
+	            }
+            }
+        }
+        m_TimerSetIndex = (m_TimerSetIndex + 1) % m_Timers.size();
+
         if (std::ranges::any_of(m_GraphicsPipelines, [](const auto& pipeline) { return !pipeline; }))
         {
             CreateGraphicsPipelines(framebuffer);
@@ -574,7 +618,7 @@ public:
         m_CommandList->open();
 
         {
-            std::string frameMarker = "Frame " + std::to_string(FrameCounter++);
+            std::string frameMarker = "Frame " + std::to_string(GetFrameIndex());
             m_CommandList->beginMarker(frameMarker.c_str());
         }
 
@@ -629,19 +673,22 @@ protected:
         const char* eBackends[] = { "CPU", "GPU" };
         ImGui::Combo("Backend", reinterpret_cast<int*>(&m_UI.Backend), eBackends, 2);
 
-        ImGui::Checkbox("Use Sum Reduction Prepass", &m_UI.UseSumReductionPrePass);
-
         const char* eDisplayModes[] = { "Wireframe", "Fill" };
         ImGui::Combo("Display Mode", reinterpret_cast<int*>(&m_UI.DisplayMode), eDisplayModes, 2);
 
         ImGui::SliderFloat("TargetX", &m_UI.Target.x, 0, 1);
         ImGui::SliderFloat("TargetY", &m_UI.Target.y, 0, 1);
-        m_UI.CBTFlags[CBT_Bit_Create] = ImGui::SliderInt("MaxDepth", &m_UI.CBTMaxDepth, 6, 16);
+        m_UI.CBTFlags[CBT_Bit_Create] = ImGui::SliderInt("MaxDepth", &m_UI.CBTMaxDepth, 6, 24);
         m_UI.CBTFlags[CBT_Bit_Reset] = ImGui::Button("Reset");
 
         ImGui::Separator();
 
-    	ImGui::Text("Node count: %d", static_cast<int>(m_App.GetCBTNodeCount()));
+        if (m_UI.Backend == Backend_GPU)
+        {
+            ImGui::LabelText("Subdivision (GPU)", "%.3f ms", m_UI.TimerData[Timer_Subdivision]);
+            ImGui::LabelText("Sum Reduction (GPU)", "%.3f ms", m_UI.TimerData[Timer_SumReduction]);
+            ImGui::LabelText("Draw LEB (GPU)", "%.3f ms", m_UI.TimerData[Timer_DrawLEB]);
+        }
 
         ImGui::End();
     }
