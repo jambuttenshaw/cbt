@@ -384,7 +384,7 @@ public:
         m_CBTBuffer = GetDevice()->createBuffer(bufferDesc);
     }
 
-    void CopyToCBTBuffer()
+    void CopyToCBTBuffer() const
     {
         m_CommandList->writeBuffer(m_CBTBuffer, cbt_GetHeap(m_CBT), cbt_HeapByteSize(m_CBT));
     }
@@ -434,6 +434,24 @@ public:
         }
     }
 
+    void StartTimer(GPUTimers timerLabel) const
+    {
+        auto timer = GetTimer(timerLabel);
+        if (GetDevice()->pollTimerQuery(timer))
+        {
+            // Send timer data to UI in milliseconds
+            m_UI.TimerData[timerLabel] = GetDevice()->getTimerQueryTime(timer) * 1000.0f;
+            GetDevice()->resetTimerQuery(timer);
+        }
+
+        m_CommandList->beginTimerQuery(timer);
+    }
+
+    void StopTimer(GPUTimers timerLabel) const
+    {
+    	m_CommandList->endTimerQuery(GetTimer(timerLabel));
+    }
+
     void BackBufferResizing() override
     {
         for (auto& pipeline : m_GraphicsPipelines)
@@ -473,7 +491,7 @@ public:
             // Dispatch subdivision
             {
                 m_CommandList->beginMarker(pingPong ? "Subdivision: Merge" : "Subdivision: Split");
-                m_CommandList->beginTimerQuery(GetTimer(Timer_Subdivision));
+                StartTimer(Timer_Subdivision);
 
                 nvrhi::ComputeState state;
                 state.pipeline = m_ComputePipelines[pingPong ? Pipeline_CBT_Merge : Pipeline_CBT_Split];
@@ -486,14 +504,14 @@ public:
 
                 m_CommandList->dispatchIndirect(offsetof(IndirectArgs, DispatchArgs));
 
-                m_CommandList->endTimerQuery(GetTimer(Timer_Subdivision));
+                StopTimer(Timer_Subdivision);
                 m_CommandList->endMarker();
             }
 
             // Perform sum reduction
             {
                 m_CommandList->beginMarker("Sum Reduction");
-                m_CommandList->beginTimerQuery(GetTimer(Timer_SumReduction));
+                StartTimer(Timer_SumReduction);
 
                 int it = static_cast<int>(cbt_MaxDepth(m_CBT));
 
@@ -536,7 +554,7 @@ public:
                     m_CommandList->dispatch(static_cast<uint32_t>(numGroup));
                 }
 
-                m_CommandList->endTimerQuery(GetTimer(Timer_SumReduction));
+                StopTimer(Timer_SumReduction);
                 m_CommandList->endMarker();
             }
 
@@ -554,7 +572,7 @@ public:
     void DrawLeb(nvrhi::IFramebuffer* framebuffer)
     {
         m_CommandList->beginMarker("Draw LEB");
-        m_CommandList->beginTimerQuery(GetTimer(Timer_DrawLEB));
+        StartTimer(Timer_DrawLEB);
 
         {
             nvrhi::ComputeState state;
@@ -577,7 +595,7 @@ public:
             m_CommandList->drawIndirect(offsetof(IndirectArgs, DrawArgs));
         }
 
-        m_CommandList->endTimerQuery(GetTimer(Timer_DrawLEB));
+        StopTimer(Timer_DrawLEB);
     	m_CommandList->endMarker();
     }
 
@@ -612,9 +630,7 @@ public:
                 const auto& timer = timers[timerIndex];
 	            if (GetDevice()->pollTimerQuery(timer))
 	            {
-                    // Send timer data to UI in milliseconds
-                    m_UI.TimerData[timerIndex] = GetDevice()->getTimerQueryTime(timer) * 1000.0f;
-                    GetDevice()->resetTimerQuery(timer);
+                    
 	            }
             }
         }
