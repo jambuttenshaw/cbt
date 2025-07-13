@@ -1,7 +1,9 @@
 #include <donut/shaders/binding_helpers.hlsli>
+#include "cbt_shared.h"
 
 #define CBT_FLAG_WRITE
 
+#define CBT_HEAP_BUFFER_BINDING REGISTER_UAV(0, CBT_REGISTER_SPACE)
 #include "../libcbt/hlsl/ConcurrentBinaryTree.hlsl"
 #include "../libleb/hlsl/LongestEdgeBisection.hlsl"
 
@@ -9,7 +11,7 @@ struct PushConstants
 {
     float2 Target;
 };
-DECLARE_PUSH_CONSTANTS(PushConstants, g_Push, 0, 0);
+DECLARE_PUSH_CONSTANTS(PushConstants, g_Push, 0, CONSTANTS_REGISTER_SPACE);
 
 
 float Wedge(float2 a, float2 b)

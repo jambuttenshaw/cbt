@@ -1,10 +1,11 @@
 #include <donut/shaders/binding_helpers.hlsli>
+#include "cbt_shared.h"
 
 struct PushConstants
 {
 	float2 Target;
 };
-DECLARE_PUSH_CONSTANTS(PushConstants, g_Push, 0, 0);
+DECLARE_PUSH_CONSTANTS(PushConstants, g_Push, 0, CONSTANTS_REGISTER_SPACE);
 
 static const float2 g_offsets[] = {
 	float2(-1, -1),

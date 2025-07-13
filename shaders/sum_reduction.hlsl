@@ -1,14 +1,16 @@
 #include <donut/shaders/binding_helpers.hlsli>
+#include "cbt_shared.h"
 
 #define CBT_FLAG_WRITE
 
+#define CBT_HEAP_BUFFER_BINDING REGISTER_UAV(0, CBT_REGISTER_SPACE)
 #include "../libcbt/hlsl/ConcurrentBinaryTree.hlsl"
 
 struct PushConstants
 {
     uint PassID;
 };
-DECLARE_PUSH_CONSTANTS(PushConstants, g_Push, 0, 0);
+DECLARE_PUSH_CONSTANTS(PushConstants, g_Push, 0, CONSTANTS_REGISTER_SPACE);
 
 
 // For improved performance, multiple passes (5) can be performed in a single kernel

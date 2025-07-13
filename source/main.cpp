@@ -15,6 +15,8 @@
 #define LEB_IMPLEMENTATION
 #include "leb.h"
 
+#include "cbt_shared.h"
+
 using namespace donut;
 using namespace donut::math;
 
@@ -269,8 +271,9 @@ public:
         // Setup bindings
         {
             nvrhi::BindingLayoutDesc layoutDesc;
-            layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel)
-                .setRegisterSpace(0)
+            layoutDesc.setVisibility(nvrhi::ShaderType::All)
+                .setRegisterSpace(CONSTANTS_REGISTER_SPACE)
+                .setRegisterSpaceIsDescriptorSet(true)
                 .addItem(nvrhi::BindingLayoutItem::PushConstants(0, sizeof(uint2)));
             m_BindingLayouts[Bindings_Constants] = GetDevice()->createBindingLayout(layoutDesc);
 
@@ -280,15 +283,16 @@ public:
         }
         {
             nvrhi::BindingLayoutDesc layoutDesc;
-            layoutDesc.setRegisterSpace(0);
+            layoutDesc.setRegisterSpace(CBT_REGISTER_SPACE)
+                .setRegisterSpaceIsDescriptorSet(true);
 
-            layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel);
+            layoutDesc.setVisibility(nvrhi::ShaderType::All);
             layoutDesc.bindings = {
                 nvrhi::BindingLayoutItem::StructuredBuffer_SRV(0)
             };
             m_BindingLayouts[Bindings_CBTReadOnly] = GetDevice()->createBindingLayout(layoutDesc);
 
-            layoutDesc.setVisibility(nvrhi::ShaderType::Vertex | nvrhi::ShaderType::Pixel);
+            layoutDesc.setVisibility(nvrhi::ShaderType::All);
             layoutDesc.bindings = {
                 nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0)
             };
@@ -297,7 +301,8 @@ public:
         {
             nvrhi::BindingLayoutDesc layoutDesc;
             layoutDesc.setVisibility(nvrhi::ShaderType::Compute)
-                .setRegisterSpace(0)
+                .setRegisterSpace(INDIRECT_ARGS_REGISTER_SPACE)
+                .setRegisterSpaceIsDescriptorSet(true)
                 .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0));
             m_BindingLayouts[Bindings_IndirectArgs] = GetDevice()->createBindingLayout(layoutDesc);
 
@@ -341,6 +346,7 @@ public:
             for (auto& timer : timers)
             {
 				timer = GetDevice()->createTimerQuery();
+                GetDevice()->resetTimerQuery(timer);
             }
         }
 
@@ -504,6 +510,9 @@ public:
                     uint2 constants = { static_cast<uint>(it), 0 };
                     m_CommandList->setPushConstants(&constants, sizeof(constants));
 
+                    nvrhi::utils::BufferUavBarrier(m_CommandList, m_CBTBuffer);
+                    m_CommandList->commitBarriers();
+
                     m_CommandList->dispatch(static_cast<uint32_t>(numGroup));
 
                     it -= 5;
@@ -513,17 +522,18 @@ public:
                 state.bindings = { m_BindingSets[Bindings_CBTReadWrite], m_BindingSets[Bindings_Constants] };
                 m_CommandList->setComputeState(state);
 
-                while (--it >= 0) {
+                while (--it >= 0) 
+                {
                     int cnt = 1 << it;
                     int numGroup = (cnt >= 256) ? (cnt >> 8) : 1;
 
                     uint2 constants = { static_cast<uint>(it), 0 };
                     m_CommandList->setPushConstants(&constants, sizeof(constants));
 
-                    m_CommandList->dispatch(static_cast<uint32_t>(numGroup));
-
                     nvrhi::utils::BufferUavBarrier(m_CommandList, m_CBTBuffer);
                     m_CommandList->commitBarriers();
+
+                    m_CommandList->dispatch(static_cast<uint32_t>(numGroup));
                 }
 
                 m_CommandList->endTimerQuery(GetTimer(Timer_SumReduction));

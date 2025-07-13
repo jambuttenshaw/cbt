@@ -1,7 +1,7 @@
-
 #include <donut/shaders/binding_helpers.hlsli>
+#include "cbt_shared.h"
 
-// Relative paths allow work for intellisense
+#define CBT_HEAP_BUFFER_BINDING REGISTER_SRV(0, CBT_REGISTER_SPACE)
 #include "../libcbt/hlsl/ConcurrentBinaryTree.hlsl"
 #include "../libleb/hlsl/LongestEdgeBisection.hlsl"
 

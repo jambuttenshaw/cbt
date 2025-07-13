@@ -1,6 +1,8 @@
 
 #include <donut/shaders/binding_helpers.hlsli>
+#include "cbt_shared.h"
 
+#define CBT_HEAP_BUFFER_BINDING REGISTER_SRV(0, CBT_REGISTER_SPACE)
 #include "../libcbt/hlsl/ConcurrentBinaryTree.hlsl"
 
 struct IndirectArgs
@@ -20,7 +22,7 @@ struct IndirectArgs
         uint startInstanceLocation;
     } lebDispatch;
 };
-RWStructuredBuffer<IndirectArgs> RWIndirectArgs : REGISTER_UAV(0, 0);
+RWStructuredBuffer<IndirectArgs> RWIndirectArgs : REGISTER_UAV(0, INDIRECT_ARGS_REGISTER_SPACE);
 
 [numthreads(1, 1, 1)]
 void cbt_dispatcher_cs()
