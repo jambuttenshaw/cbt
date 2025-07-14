@@ -622,18 +622,6 @@ public:
 
     void Render(nvrhi::IFramebuffer* framebuffer) override
     {
-        // Check if any timers have data available
-        {
-            const auto& timers = m_Timers.at(m_TimerSetIndex);
-            for (size_t timerIndex = 0; timerIndex < timers.size(); timerIndex++)
-            {
-                const auto& timer = timers[timerIndex];
-	            if (GetDevice()->pollTimerQuery(timer))
-	            {
-                    
-	            }
-            }
-        }
         m_TimerSetIndex = (m_TimerSetIndex + 1) % m_Timers.size();
 
         if (std::ranges::any_of(m_GraphicsPipelines, [](const auto& pipeline) { return !pipeline; }))
