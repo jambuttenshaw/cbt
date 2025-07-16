@@ -1,6 +1,6 @@
 [submodule "Donut"]
 	path = Donut
-	url = https://github.com/NVIDIA-RTX/Donut
+	url = https://github.com/jambuttenshaw/Donut
 [submodule "libcbt"]
 	path = libcbt
 	url = https://github.com/jdupuy/libcbt
