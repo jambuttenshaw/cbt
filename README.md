@@ -3,7 +3,7 @@ This is a port of the [subdivision example](https://github.com/jdupuy/LongestEdg
 
 It is implemented using NVIDIA's [Donut](https://github.com/NVIDIA-RTX/Donut) framework and can run on both DirectX12 and Vulkan.
 
-**Note:** This repository currently uses my own forks of Donut and libcbt due to pending pull requests with fixes in libcbt and nvrhi (dependency of Donut).
+**Note:** This repository currently uses my own fork of libcbt due to a pending pull request with a fix in the resource bindings in the HLSL library.
 
 ![alt text](assets/preview.png)
 
